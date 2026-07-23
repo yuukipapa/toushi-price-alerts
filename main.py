@@ -13,14 +13,19 @@ chart_check.html 側の ALERT_SYNC と同じ形式で保存されている。
 すべて環境変数(GitHub Secrets経由)から読む。
 必要な環境変数: ALERT_KEY, GMAIL_USER, GMAIL_APP_PASSWORD
 """
+import io
 import math
 import os
 import re
 import smtplib
 import sys
 from datetime import datetime, timezone
+from email.mime.image import MIMEImage
+from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
+import mplfinance as mpf
+import pandas as pd
 import requests
 from curl_cffi import requests as cffi_requests
 
@@ -194,13 +199,79 @@ def detect_levels(candles: list, k: int = 2) -> list:
     return levels
 
 
+# ── チャート画像の生成(通知メールに添付する用) ──
+
+def asset_symbol(entry: dict) -> str:
+    # GitHub Actionsのランナーには日本語フォントが無く、チャート画像内のタイトルに
+    # 日本語ラベルを使うと文字が表示されない(tofu化する)ため、ASCIIのティッカーを使う
+    return entry.get("ysym") or entry.get("sym") or entry.get("isin") or entry.get("assetKey") or "?"
+
+
+
+def render_chart_png(candles: list, title: str, hline: float = None, aline: tuple = None, n: int = 60) -> bytes:
+    rows = candles[-n:]
+    df = pd.DataFrame(rows)
+    df["t"] = pd.to_datetime(df["t"], unit="ms")
+    df = df.set_index("t").rename(columns={"o": "Open", "h": "High", "l": "Low", "c": "Close"})
+
+    kwargs = {}
+    if hline is not None:
+        kwargs["hlines"] = dict(hlines=[hline], colors=["#2962ff"], linestyle="--", linewidths=[1.2])
+    if aline is not None:
+        # mplfinanceのalinesは「表示中のローソク足の日付」と厳密一致する点しか受け付けないため、
+        # 直線の傾きはそのまま保ちつつ、両端を表示範囲内の実在する日付にスナップする
+        (t1, p1), (t2, p2) = aline
+        visible_ts = [r["t"] for r in rows]
+        slope = (math.log(p2) - math.log(p1)) / (t2 - t1) if t2 != t1 else 0.0
+
+        def price_at(t_ms):
+            return math.exp(math.log(p1) + slope * (t_ms - t1))
+
+        t1s = min(visible_ts, key=lambda x: abs(x - t1))
+        t2s = min(visible_ts, key=lambda x: abs(x - t2))
+        pts = [(pd.to_datetime(t1s, unit="ms"), price_at(t1s)), (pd.to_datetime(t2s, unit="ms"), price_at(t2s))]
+        kwargs["alines"] = dict(alines=[pts], colors=["#2962ff"], linewidths=[1.2])
+
+    buf = io.BytesIO()
+    mpf.plot(
+        df, type="candle", style="yahoo", title=title, volume=False,
+        figsize=(7, 4), savefig=dict(fname=buf, dpi=110, bbox_inches="tight"),
+        **kwargs,
+    )
+    buf.seek(0)
+    return buf.getvalue()
+
+
 # ── メール送信 ──
 
-def send_email(gmail_user: str, gmail_pass: str, to_addr: str, subject: str, body: str) -> None:
-    msg = MIMEText(body)
-    msg["Subject"] = subject
-    msg["From"] = gmail_user
-    msg["To"] = to_addr
+def send_email(gmail_user: str, gmail_pass: str, to_addr: str, subject: str, body: str, images: list = None) -> None:
+    if not images:
+        msg = MIMEText(body)
+        msg["Subject"] = subject
+        msg["From"] = gmail_user
+        msg["To"] = to_addr
+    else:
+        msg = MIMEMultipart("related")
+        msg["Subject"] = subject
+        msg["From"] = gmail_user
+        msg["To"] = to_addr
+
+        html_body = body.replace("\n", "<br>\n")
+        for img in images:
+            caption = img.get("caption", "")
+            html_body += f'<br>{caption}<br><img src="cid:{img["cid"]}" style="max-width:640px"><br>\n'
+
+        alt = MIMEMultipart("alternative")
+        alt.attach(MIMEText(body, "plain"))
+        alt.attach(MIMEText(html_body, "html"))
+        msg.attach(alt)
+
+        for img in images:
+            mime_img = MIMEImage(img["data"])
+            mime_img.add_header("Content-ID", f"<{img['cid']}>")
+            mime_img.add_header("Content-Disposition", "inline", filename=f"{img['cid']}.png")
+            msg.attach(mime_img)
+
     with smtplib.SMTP("smtp.gmail.com", 587) as server:
         server.starttls()
         server.login(gmail_user, gmail_pass)
@@ -272,7 +343,8 @@ def check_alerts(doc: dict, gmail_user: str, gmail_pass: str) -> bool:
                         "チャートツールで確認: https://wyujiro-toushi-chart.web.app\n\n"
                         "※ これは投資助言ではありません。売買の最終判断は自分で行ってください。"
                     )
-                    send_email(gmail_user, gmail_pass, to_addr, subject, body)
+                    images = _render_alert_chart(a, is_trend, line_price)
+                    send_email(gmail_user, gmail_pass, to_addr, subject, body, images=images)
                     print(f"[alerts] sent: {a['label']} {line_desc}")
                 except Exception as e:
                     print(f"[alerts] email send failed: {e}")
@@ -280,6 +352,29 @@ def check_alerts(doc: dict, gmail_user: str, gmail_pass: str) -> bool:
                 print("[alerts] notifyEmail not set, skipping email")
 
     return changed
+
+
+def _render_alert_chart(a: dict, is_trend: bool, line_price: float) -> list:
+    # 通知するときだけ過去足を取得してチャート画像を作る(毎回のチェックでは取得しない)
+    try:
+        if a.get("assetType") == "stock":
+            candles = fetch_stock_candles(a["ysym"])
+        elif a.get("assetType") == "fund":
+            candles = fetch_fund_candles(a["isin"], a["assoc"])
+        elif a.get("assetType") == "crypto":
+            candles = fetch_crypto_candles(a["sym"])
+        else:
+            return None
+        if is_trend:
+            now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+            aline = ((a["t1"], a["p1"]), (now_ms, line_price))
+            png = render_chart_png(candles, asset_symbol(a), aline=aline)
+        else:
+            png = render_chart_png(candles, asset_symbol(a), hline=line_price)
+        return [{"cid": "chart1", "data": png, "caption": ""}]
+    except Exception as e:
+        print(f"[alerts] chart render failed: {e}")
+        return None
 
 
 def trend_price_now(a: dict) -> float:
@@ -364,7 +459,13 @@ def check_watchlist(doc: dict, gmail_user: str, gmail_pass: str) -> bool:
                         "チャートツールで確認: https://wyujiro-toushi-chart.web.app\n\n"
                         "※ これは投資助言ではありません。売買の最終判断は自分で行ってください。"
                     )
-                    send_email(gmail_user, gmail_pass, to_addr, subject, body)
+                    try:
+                        png = render_chart_png(candles, asset_symbol(w), hline=lv["price"])
+                        images = [{"cid": "chart1", "data": png, "caption": ""}]
+                    except Exception as e:
+                        print(f"[watchlist] chart render failed: {e}")
+                        images = None
+                    send_email(gmail_user, gmail_pass, to_addr, subject, body, images=images)
                     print(f"[watchlist] sent: {w['label']} @ {lv['price']:.4g} (current {current})")
                 except Exception as e:
                     print(f"[watchlist] email send failed: {e}")

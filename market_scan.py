@@ -16,7 +16,7 @@ import time
 
 import requests
 
-from main import DB_URL, detect_levels, fetch_stock_candles, send_email
+from main import DB_URL, detect_levels, fetch_stock_candles, render_chart_png, send_email
 from nikkei225 import NIKKEI225
 
 NEAR_PCT = 0.02       # 支持線の±2%以内を「接近中」とみなす(日次スキャンなので🔔より少し広め)
@@ -54,7 +54,7 @@ def find_near_support(ysym: str, label: str) -> list:
             hits.append({
                 "ysym": ysym, "label": label, "current": current,
                 "price": lv["price"], "touches": lv["touches"],
-                "kind": lv["kind"], "dist_pct": dist_pct,
+                "kind": lv["kind"], "dist_pct": dist_pct, "candles": candles,
             })
     return hits
 
@@ -115,16 +115,22 @@ def main() -> None:
         "※ 学習メモの考え方に沿った機械的な抽出であり、投資助言ではありません。",
         "",
     ]
-    for h in top:
+    images = []
+    for i, h in enumerate(top):
         lines.append(f"■ {h['label']} ({h['ysym'].replace('.T', '')})")
         lines.append("  " + build_reason(h))
         lines.append("")
+        try:
+            png = render_chart_png(h["candles"], h["ysym"], hline=h["price"])
+            images.append({"cid": f"chart{i}", "data": png, "caption": f"<b>{h['label']}</b>"})
+        except Exception as e:
+            print(f"[scan] chart render failed for {h['label']}: {e}")
     lines.append("チャートツールで確認: https://wyujiro-toushi-chart.web.app")
 
     body = "\n".join(lines)
     subject = f"📊 今日の支持線接近スキャン: {top[0]['label']}など{len(top)}件"
     try:
-        send_email(gmail_user, gmail_pass, to_addr, subject, body)
+        send_email(gmail_user, gmail_pass, to_addr, subject, body, images=images or None)
         print("sent digest email")
     except Exception as e:
         print(f"email send failed: {e}")
