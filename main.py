@@ -242,36 +242,55 @@ def check_alerts(doc: dict, gmail_user: str, gmail_pass: str) -> bool:
         if price is None:
             continue
 
-        side = "above" if price >= a["price"] else "below"
+        is_trend = a.get("kind") == "trend"
+        try:
+            line_price = trend_price_now(a) if is_trend else a["price"]
+        except Exception as e:
+            print(f"[alerts] trend extrapolation failed for {a.get('label')}: {e}")
+            continue
+        line_desc = f"斜め線(延長線上の現在値 {line_price:.4g})" if is_trend else f"{line_price}"
+
+        side = "above" if price >= line_price else "below"
         if a.get("lastSide") is None:
             a["lastSide"] = side  # 初回チェックは基準の記録のみ(いきなり通知しない)
             changed = True
-            print(f"[alerts] baseline set: {a['label']} @ {a['price']} (current {price}, {side})")
+            print(f"[alerts] baseline set: {a['label']} {line_desc} (current {price}, {side})")
             continue
         if side == a["lastSide"]:
-            print(f"[alerts] no change: {a['label']} @ {a['price']} (current {price}, still {side})")
+            print(f"[alerts] no change: {a['label']} {line_desc} (current {price}, still {side})")
         if side != a["lastSide"]:
             a["lastSide"] = side
             a["firedAt"] = datetime.now(timezone.utc).isoformat()
             changed = True
             if to_addr:
                 try:
-                    subject = f"🔔 価格アラート: {a['label']} が {a['price']} を通過"
+                    subject = f"🔔 価格アラート: {a['label']} が {line_desc} を通過"
                     body = (
-                        f"{a['label']} の価格が、設定していたライン {a['price']} を通過しました。\n\n"
+                        f"{a['label']} の価格が、設定していたライン {line_desc} を通過しました。\n\n"
                         f"現在価格: {price}\n"
                         f"メモ: {a.get('note') or '(なし)'}\n\n"
                         "チャートツールで確認: https://wyujiro-toushi-chart.web.app\n\n"
                         "※ これは投資助言ではありません。売買の最終判断は自分で行ってください。"
                     )
                     send_email(gmail_user, gmail_pass, to_addr, subject, body)
-                    print(f"[alerts] sent: {a['label']} @ {a['price']}")
+                    print(f"[alerts] sent: {a['label']} {line_desc}")
                 except Exception as e:
                     print(f"[alerts] email send failed: {e}")
             else:
                 print("[alerts] notifyEmail not set, skipping email")
 
     return changed
+
+
+def trend_price_now(a: dict) -> float:
+    # 斜め線(トレンドライン)は時間で価格が変わるため、保存した2点(t1,p1)-(t2,p2)から
+    # 現在時刻での延長線上の価格をlog空間で線形補間して求める(chart_check.htmlの傾き計算と同じ考え方)
+    t1, p1, t2, p2 = a["t1"], a["p1"], a["t2"], a["p2"]
+    now_ms = datetime.now(timezone.utc).timestamp() * 1000
+    if t2 == t1:
+        return p2
+    slope = (math.log(p2) - math.log(p1)) / (t2 - t1)
+    return math.exp(math.log(p1) + slope * (now_ms - t1))
 
 
 # ── ②ウォッチリスト(自動で線を引いて監視) ──
