@@ -246,7 +246,10 @@ def check_alerts(doc: dict, gmail_user: str, gmail_pass: str) -> bool:
         if a.get("lastSide") is None:
             a["lastSide"] = side  # 初回チェックは基準の記録のみ(いきなり通知しない)
             changed = True
+            print(f"[alerts] baseline set: {a['label']} @ {a['price']} (current {price}, {side})")
             continue
+        if side == a["lastSide"]:
+            print(f"[alerts] no change: {a['label']} @ {a['price']} (current {price}, still {side})")
         if side != a["lastSide"]:
             a["lastSide"] = side
             a["firedAt"] = datetime.now(timezone.utc).isoformat()
@@ -305,7 +308,12 @@ def check_watchlist(doc: dict, gmail_user: str, gmail_pass: str) -> bool:
 
         levels = detect_levels(candles)
         if not levels:
+            print(f"[watchlist] {w['label']}: not enough candles to detect levels ({len(candles)})")
             continue
+
+        nearest = min(levels, key=lambda lv: abs(current - lv["price"]) / lv["price"] if lv["price"] > 0 else float("inf"))
+        nearest_dist = abs(current - nearest["price"]) / nearest["price"] * 100 if nearest["price"] > 0 else float("inf")
+        print(f"[watchlist] {w['label']}: current={current} nearest_level={nearest['price']:.4g} ({nearest_dist:.1f}% away)")
 
         notified = w.get("notifiedLevels") or {}
         for lv in levels:
@@ -373,6 +381,7 @@ def main() -> None:
         return
 
     requests.put(doc_url, json=doc, timeout=10)
+    print("saved changes")
 
 
 if __name__ == "__main__":
