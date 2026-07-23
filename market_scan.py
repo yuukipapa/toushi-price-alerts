@@ -16,7 +16,7 @@ import time
 
 import requests
 
-from main import DB_URL, detect_levels, fetch_stock_candles, render_chart_png, send_email
+from main import DB_URL, describe_level_context, detect_levels, fetch_stock_candles, render_chart_png, send_email
 from nikkei225 import NIKKEI225
 
 NEAR_PCT = 0.02       # 支持線の±2%以内を「接近中」とみなす(日次スキャンなので🔔より少し広め)
@@ -60,12 +60,7 @@ def find_near_support(ysym: str, label: str) -> list:
 
 
 def build_reason(hit: dict) -> str:
-    kind_label = "上場来高値(ATH)圏での攻防線" if hit["kind"] == "ath" else f"週足で{hit['touches']}回反応した支持線"
-    return (
-        f"{kind_label} {hit['price']:.4g} の {hit['dist_pct'] * 100:.1f}%上に位置(現在値 {hit['current']:.4g})。"
-        "反応回数が多い線ほど効きやすいという考え方に基づく抽出。"
-        "実体で割り込まずに反発すればチャンス、実体で下に抜けたら早めに見切るのが基本(投資助言ではありません)。"
-    )
+    return describe_level_context(hit["current"], hit["price"], hit["touches"], hit["kind"])
 
 
 def main() -> None:

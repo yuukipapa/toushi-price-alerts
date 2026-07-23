@@ -278,6 +278,52 @@ def send_email(gmail_user: str, gmail_pass: str, to_addr: str, subject: str, bod
         server.sendmail(gmail_user, [to_addr], msg.as_string())
 
 
+# ── 通知文の生成(水平線トレードの考え方に沿った根拠を書く) ──
+
+def describe_cross(direction: str, is_trend: bool, note: str) -> str:
+    line_type = "斜め線(トレンドライン)" if is_trend else "水平線"
+    if direction == "up":  # 下から上に抜けた(ブレイクアウト/レジサポ転換の入口)
+        text = (
+            f"この{line_type}を下から上に抜けました。教材の考え方では、抵抗として機能していた線を実体で上に抜けると"
+            "「レジサポ転換」(それまでの抵抗がサポートに変わる)が起きたかどうかがポイントになります。"
+            "抜けた直後に飛びつくより、いったんこの線まで戻ってきてサポートとして機能するか確認してから入る方が、"
+            "損切りが浅く・リスクリワードが合いやすいとされています。ヒゲだけでなく実体で維持できているかも確認してください。"
+        )
+    else:  # 上から下に割れた(損切り・シナリオ崩れの合図)
+        text = (
+            f"この{line_type}を上から下に割りました。教材の損切りの基準は「シナリオが崩れたら」であり、"
+            "支持していた線を割ったことはまさにそのシナリオ崩れのサインです。実体で割れているか(ヒゲだけでないか)を確認し、"
+            "実体で割れていれば早めに見切るのが基本とされています。最底辺の線まで割ったならその銘柄を一旦手放す、という考え方も教材にあります。"
+        )
+    if note:
+        text += f"\n\nこの線を引いたときのメモ: {note}"
+    return text
+
+
+def describe_level_context(current: float, level_price: float, touches: int, kind: str) -> str:
+    if kind == "ath":
+        return (
+            "現在価格が上場来高値(ATH)圏にあります。教材の考え方では、ATH更新が続くのは上昇トレンドとして正常な状態ですが、"
+            "その後BOX高値まで戻れない/高値で反発して落ちる場合は下落トレンド突入のシグナルとされています。"
+            "更新が続くか、それとも失速するかを実体で確認してください。"
+        )
+    is_support = level_price <= current
+    dist_pct = abs(current - level_price) / level_price * 100 if level_price else 0
+    if is_support:
+        return (
+            f"現在価格は、週足で{touches}回反応している支持線({level_price:.4g})の{dist_pct:.1f}%上にいます。"
+            "反応回数が多い線ほど効きやすい、というのが教材の考え方です。ここで下げ止まりを実体で確認できれば、"
+            "「サポートタッチでの買い場」の候補になります(ブレイク後に追いかけるより損切りが浅く、利益が大きくなりやすいとされる位置)。"
+            "逆に実体でこの線を割ってしまった場合は、シナリオが崩れたとみなして早めに見切るのが基本です。"
+        )
+    else:
+        return (
+            f"現在価格は、週足で{touches}回反応している抵抗線({level_price:.4g})の{dist_pct:.1f}%下にいます。"
+            "教材ではこの位置は「抵抗線に当たって落ちることが想定されるタイミング」であり、新規で買うよりも利確を検討する場面とされています。"
+            "実体でこの線を超えて維持できれば「レジサポ転換」の可能性もあるので、超えた後の値動きも確認してください。"
+        )
+
+
 # ── ①アラート(手動で🔔設定した線) ──
 
 def check_alerts(doc: dict, gmail_user: str, gmail_pass: str) -> bool:
@@ -336,10 +382,12 @@ def check_alerts(doc: dict, gmail_user: str, gmail_pass: str) -> bool:
             if to_addr:
                 try:
                     subject = f"🔔 価格アラート: {a['label']} が {line_desc} を通過"
+                    direction = "up" if side == "above" else "down"
+                    reason = describe_cross(direction, is_trend, a.get("note") or "")
                     body = (
                         f"{a['label']} の価格が、設定していたライン {line_desc} を通過しました。\n\n"
-                        f"現在価格: {price}\n"
-                        f"メモ: {a.get('note') or '(なし)'}\n\n"
+                        f"現在価格: {price}\n\n"
+                        f"【この通知の根拠】\n{reason}\n\n"
                         "チャートツールで確認: https://wyujiro-toushi-chart.web.app\n\n"
                         "※ これは投資助言ではありません。売買の最終判断は自分で行ってください。"
                     )
@@ -451,11 +499,12 @@ def check_watchlist(doc: dict, gmail_user: str, gmail_pass: str) -> bool:
                 try:
                     kind_label = {"ath": "上場来高値(ATH)", "lv": f"{lv['touches']}回反応の水平線"}.get(lv["kind"], "水平線")
                     subject = f"👁 ウォッチ通知: {w['label']} が {kind_label}({lv['price']:.4g})に接近"
+                    reason = describe_level_context(current, lv["price"], lv["touches"], lv["kind"])
                     body = (
                         f"{w['label']} の価格が、自動検出した{kind_label} {lv['price']:.4g} の"
                         f"±{NEAR_PCT * 100:.0f}%以内に近づきました。\n\n"
-                        f"現在価格: {current}\n"
-                        f"検出した線: {lv['price']:.4g}({kind_label})\n\n"
+                        f"現在価格: {current}\n\n"
+                        f"【この通知の根拠】\n{reason}\n\n"
                         "チャートツールで確認: https://wyujiro-toushi-chart.web.app\n\n"
                         "※ これは投資助言ではありません。売買の最終判断は自分で行ってください。"
                     )
