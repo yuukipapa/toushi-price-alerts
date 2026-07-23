@@ -51,10 +51,13 @@ def fetch_fund_price(isin: str, assoc: str) -> float:
 
 
 def fetch_crypto_price(sym: str) -> float:
-    url = f"https://api.binance.com/api/v3/ticker/price?symbol={sym}"
+    # Binanceは米国リージョンのIPを451でブロックするため(GitHub ActionsのランナーもUS)、
+    # chart_check.html側(ブラウザから直接Binance)とは別にCoinbaseの公開APIを使う(キー不要)
+    base = sym[:-4] if sym.endswith("USDT") else sym
+    url = f"https://api.coinbase.com/v2/prices/{base}-USD/spot"
     r = requests.get(url, timeout=10)
     r.raise_for_status()
-    return float(r.json()["price"])
+    return float(r.json()["data"]["amount"])
 
 
 def send_alert_email(gmail_user: str, gmail_pass: str, to_addr: str, alert: dict, price) -> None:
