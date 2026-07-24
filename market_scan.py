@@ -13,6 +13,7 @@ AIによる勝率判定ではない。あくまで学習メモの考え方に沿
 """
 import os
 import time
+from urllib.parse import quote
 
 import requests
 
@@ -26,6 +27,13 @@ NEAR_PCT = 0.02       # 支持線の±2%以内を「接近中」とみなす(日
 MIN_TOUCHES = 2        # detect_levels() の強い線フィルタと同じ基準
 TOP_N = 8               # メールに載せる件数
 REQUEST_DELAY_SEC = 0.5  # Yahoo側のレート制限を避けるための間隔
+CHART_TOOL_URL = "https://wyujiro-toushi-chart.web.app"
+
+
+def chart_link(ysym: str, label: str) -> str:
+    """その銘柄の最新チャートを週足・自動線引き済みで開くリンク。
+    メール送信時点でなく、クリックした時点の最新データを表示する(過去メールから開いても最新状態を確認できる)。"""
+    return f"{CHART_TOOL_URL}/?ysym={quote(ysym)}&label={quote(label)}&tf=1w"
 
 
 def build_universe(doc: dict) -> list:
@@ -136,6 +144,7 @@ def main() -> None:
     for i, h in enumerate(top):
         lines.append(f"■ {h['label']} ({h['ysym'].replace('.T', '')})")
         lines.append("  " + build_reason(h))
+        lines.append("  最新チャートを見る: " + chart_link(h["ysym"], h["label"]))
         lines.append("")
         try:
             if h["line_type"] == "trend":
@@ -146,7 +155,7 @@ def main() -> None:
             images.append({"cid": f"chart{i}", "data": png, "caption": f"<b>{h['label']}</b>"})
         except Exception as e:
             print(f"[scan] chart render failed for {h['label']}: {e}")
-    lines.append("チャートツールで確認: https://wyujiro-toushi-chart.web.app")
+    lines.append(f"チャートツールで確認: {CHART_TOOL_URL}")
 
     body = "\n".join(lines)
     subject = f"📊 今日の支持線接近スキャン: {top[0]['label']}など{len(top)}件"
