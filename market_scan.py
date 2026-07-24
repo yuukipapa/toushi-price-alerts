@@ -2,9 +2,9 @@
 日次マーケットスキャン(1日1回、GitHub Actionsで実行)
 
 対象: 日経225 + chart_check.html で🔔/👁登録している株式銘柄。
-週足で自動的に支持線・抵抗線を検出し(chart_check.html「自動で線を引く」と同じロジック)、
-現在価格が支持線に近づいている(=反発すればチャンスになりうる)銘柄を、反応回数が多い順に
-上位だけメールでまとめて知らせる。
+週足で自動的に支持線・抵抗線・斜めのトレンドラインを検出し(chart_check.html「自動で線を引く」と同じロジック)、
+現在価格が支持線(水平線・斜め線どちらも)に近づいている(=反発すればチャンスになりうる)銘柄を、
+反応回数が多い順に上位だけメールでまとめて知らせる。
 
 「反応回数が多い線ほど効く」というスクショ由来の考え方をそのままスコアにしているだけで、
 AIによる勝率判定ではない。あくまで学習メモの考え方に沿った機械的な絞り込み。
@@ -16,7 +16,10 @@ import time
 
 import requests
 
-from main import DB_URL, describe_level_context, detect_levels, fetch_stock_candles, render_chart_png, send_email
+from main import (
+    DB_URL, describe_level_context, describe_trendline_context, detect_levels, detect_trendlines,
+    fetch_stock_candles, render_chart_png, send_email, trendline_price_at,
+)
 from nikkei225 import NIKKEI225
 
 NEAR_PCT = 0.02       # 支持線の±2%以内を「接近中」とみなす(日次スキャンなので🔔より少し広め)
@@ -38,13 +41,12 @@ def build_universe(doc: dict) -> list:
 
 def find_near_support(ysym: str, label: str) -> list:
     candles = fetch_stock_candles(ysym)
-    levels = detect_levels(candles)
-    if not levels or len(candles) < 30:
+    if len(candles) < 30:
         return []
     current = candles[-1]["c"]
 
     hits = []
-    for lv in levels:
+    for lv in detect_levels(candles):
         if lv["price"] <= 0 or lv["price"] > current:
             continue  # 支持線(現在値より下)だけを対象にする
         if lv["touches"] < MIN_TOUCHES:
@@ -52,14 +54,31 @@ def find_near_support(ysym: str, label: str) -> list:
         dist_pct = (current - lv["price"]) / lv["price"]
         if dist_pct <= NEAR_PCT:
             hits.append({
-                "ysym": ysym, "label": label, "current": current,
+                "line_type": "h", "ysym": ysym, "label": label, "current": current,
                 "price": lv["price"], "touches": lv["touches"],
                 "kind": lv["kind"], "dist_pct": dist_pct, "candles": candles,
+            })
+
+    # 斜めの支持線(安値同士を結んだトレンドライン)も同様にチェックする
+    for tl in detect_trendlines(candles):
+        if tl["kind"] != "sup":
+            continue  # マーケットスキャンは「反発すればチャンス」に絞るため支持線のみ
+        line_now = trendline_price_at(tl, len(candles) - 1)
+        if line_now <= 0 or line_now > current:
+            continue
+        dist_pct = (current - line_now) / line_now
+        if dist_pct <= NEAR_PCT:
+            hits.append({
+                "line_type": "trend", "ysym": ysym, "label": label, "current": current,
+                "price": line_now, "touches": tl["touches"], "kind": "sup",
+                "dist_pct": dist_pct, "candles": candles, "i1": tl["i1"], "p1": tl["p1"],
             })
     return hits
 
 
 def build_reason(hit: dict) -> str:
+    if hit["line_type"] == "trend":
+        return describe_trendline_context(hit["current"], hit["price"], hit["touches"], hit["kind"])
     return describe_level_context(hit["current"], hit["price"], hit["touches"], hit["kind"])
 
 
@@ -116,7 +135,11 @@ def main() -> None:
         lines.append("  " + build_reason(h))
         lines.append("")
         try:
-            png = render_chart_png(h["candles"], h["ysym"], hline=h["price"])
+            if h["line_type"] == "trend":
+                aline = ((h["candles"][h["i1"]]["t"], h["p1"]), (h["candles"][-1]["t"], h["price"]))
+                png = render_chart_png(h["candles"], h["ysym"], aline=aline)
+            else:
+                png = render_chart_png(h["candles"], h["ysym"], hline=h["price"])
             images.append({"cid": f"chart{i}", "data": png, "caption": f"<b>{h['label']}</b>"})
         except Exception as e:
             print(f"[scan] chart render failed for {h['label']}: {e}")

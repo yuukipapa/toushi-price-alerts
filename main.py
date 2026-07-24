@@ -151,11 +151,8 @@ def fetch_crypto_candles(sym: str) -> list:
 
 # ── スイングハイロー検出 + クラスタリング(chart_check.html drawLines() のPython移植) ──
 
-def detect_levels(candles: list, k: int = 2) -> list:
+def find_pivots(candles: list, k: int) -> list:
     n = len(candles)
-    if n < 30:
-        return []
-
     pivots = []
     for i in range(k, n - k):
         is_h, is_l = True, True
@@ -167,10 +164,18 @@ def detect_levels(candles: list, k: int = 2) -> list:
             if candles[j]["l"] <= candles[i]["l"]:
                 is_l = False
         if is_h:
-            pivots.append({"p": candles[i]["h"]})
+            pivots.append({"i": i, "p": candles[i]["h"], "hi": True})
         if is_l:
-            pivots.append({"p": candles[i]["l"]})
+            pivots.append({"i": i, "p": candles[i]["l"], "hi": False})
+    return pivots
 
+
+def detect_levels(candles: list, k: int = 2) -> list:
+    n = len(candles)
+    if n < 30:
+        return []
+
+    pivots = find_pivots(candles, k)
     tol = 0.025
     clusters = []
     for pv in sorted(pivots, key=lambda x: x["p"]):
@@ -197,6 +202,50 @@ def detect_levels(candles: list, k: int = 2) -> list:
     else:
         levels.append({"price": ath, "touches": 1, "kind": "ath"})
     return levels
+
+
+def detect_trendlines(candles: list, k: int = 2) -> list:
+    # 高値同士(res)・安値同士(sup)で最もタッチ数の多い直線をそれぞれ1本ずつ選ぶ
+    # (chart_check.html drawLines() の斜め線検出ロジックのPython移植)
+    n = len(candles)
+    if n < 30:
+        return []
+    pivots = find_pivots(candles, k)
+    tol = 0.025
+
+    trendlines = []
+    for kind in ("res", "sup"):
+        pts = [p for p in pivots if p["hi"] == (kind == "res")]
+        best = None
+        for a in range(len(pts)):
+            for b in range(a + 1, len(pts)):
+                if pts[b]["i"] - pts[a]["i"] < n * 0.15:
+                    continue  # 近すぎるペアは除外
+                sl = (math.log(pts[b]["p"]) - math.log(pts[a]["p"])) / (pts[b]["i"] - pts[a]["i"])
+                cnt = 0
+                for c in pts:
+                    expect = math.log(pts[a]["p"]) + sl * (c["i"] - pts[a]["i"])
+                    if abs(math.log(c["p"]) - expect) < tol:
+                        cnt += 1
+                recency = (pts[b]["i"] / n) * 0.5
+                score = cnt + recency
+                if cnt >= 3 and (best is None or score > best["score"]):
+                    best = {
+                        "i1": pts[a]["i"], "p1": pts[a]["p"],
+                        "i2": pts[b]["i"], "p2": pts[b]["p"],
+                        "kind": kind, "touches": cnt, "score": score,
+                    }
+        if best:
+            trendlines.append(best)
+    return trendlines
+
+
+def trendline_price_at(tl: dict, i: float) -> float:
+    i1, p1, i2, p2 = tl["i1"], tl["p1"], tl["i2"], tl["p2"]
+    if i2 == i1:
+        return p2
+    slope = (math.log(p2) - math.log(p1)) / (i2 - i1)
+    return math.exp(math.log(p1) + slope * (i - i1))
 
 
 # ── チャート画像の生成(通知メールに添付する用) ──
@@ -321,6 +370,22 @@ def describe_level_context(current: float, level_price: float, touches: int, kin
             f"現在価格は、週足で{touches}回反応している抵抗線({level_price:.4g})の{dist_pct:.1f}%下にいます。"
             "教材ではこの位置は「抵抗線に当たって落ちることが想定されるタイミング」であり、新規で買うよりも利確を検討する場面とされています。"
             "実体でこの線を超えて維持できれば「レジサポ転換」の可能性もあるので、超えた後の値動きも確認してください。"
+        )
+
+
+def describe_trendline_context(current: float, line_price: float, touches: int, kind: str) -> str:
+    dist_pct = abs(current - line_price) / line_price * 100 if line_price else 0
+    if kind == "sup":
+        return (
+            f"現在価格は、直近の安値同士を結んだ斜めの支持線(現在値換算 {line_price:.4g})の{dist_pct:.1f}%上にいます"
+            f"(過去に{touches}回以上タッチしている線)。教材の考え方では、水平線だけでなく斜め線も"
+            "反発・反落の目印になります。ここで実体を保ったまま反発できるかが焦点で、割れた場合はシナリオ崩れとみなして早めに見切るのが基本です。"
+        )
+    else:
+        return (
+            f"現在価格は、直近の高値同士を結んだ斜めの抵抗線(現在値換算 {line_price:.4g})の{dist_pct:.1f}%下にいます"
+            f"(過去に{touches}回以上タッチしている線)。教材では、水平線と斜め線が重なる交点は特に強い抵抗とされ、"
+            "利確ポイントの候補になります。実体でこの斜め線を上に抜けて維持できれば、トレンド転換(レジサポ転換)の可能性も出てきます。"
         )
 
 
@@ -485,7 +550,7 @@ def check_watchlist(doc: dict, gmail_user: str, gmail_pass: str) -> bool:
             if dist_pct > NEAR_PCT:
                 continue
 
-            key = level_key(lv["price"])
+            key = "h:" + level_key(lv["price"])
             last_notified = notified.get(key)
             if last_notified:
                 try:
@@ -516,6 +581,54 @@ def check_watchlist(doc: dict, gmail_user: str, gmail_pass: str) -> bool:
                         images = None
                     send_email(gmail_user, gmail_pass, to_addr, subject, body, images=images)
                     print(f"[watchlist] sent: {w['label']} @ {lv['price']:.4g} (current {current})")
+                except Exception as e:
+                    print(f"[watchlist] email send failed: {e}")
+
+            notified[key] = now.isoformat()
+            changed = True
+
+        # 斜めの抵抗線・支持線(トレンドライン)も同様にチェックする
+        trendlines = detect_trendlines(candles)
+        for tl in trendlines:
+            line_now = trendline_price_at(tl, len(candles) - 1)
+            if line_now <= 0:
+                continue
+            dist_pct = abs(current - line_now) / line_now
+            if dist_pct > NEAR_PCT:
+                continue
+
+            key = "t:" + tl["kind"] + ":" + level_key(line_now)
+            last_notified = notified.get(key)
+            if last_notified:
+                try:
+                    elapsed_h = (now - datetime.fromisoformat(last_notified)).total_seconds() / 3600
+                    if elapsed_h < COOLDOWN_HOURS:
+                        continue
+                except ValueError:
+                    pass
+
+            if to_addr:
+                try:
+                    kind_label = "斜めの支持線" if tl["kind"] == "sup" else "斜めの抵抗線"
+                    subject = f"👁 ウォッチ通知: {w['label']} が {kind_label}({line_now:.4g})に接近"
+                    reason = describe_trendline_context(current, line_now, tl["touches"], tl["kind"])
+                    body = (
+                        f"{w['label']} の価格が、自動検出した{kind_label}(現在値換算 {line_now:.4g})の"
+                        f"±{NEAR_PCT * 100:.0f}%以内に近づきました。\n\n"
+                        f"現在価格: {current}\n\n"
+                        f"【この通知の根拠】\n{reason}\n\n"
+                        "チャートツールで確認: https://wyujiro-toushi-chart.web.app\n\n"
+                        "※ これは投資助言ではありません。売買の最終判断は自分で行ってください。"
+                    )
+                    try:
+                        aline = ((candles[tl["i1"]]["t"], tl["p1"]), (candles[-1]["t"], line_now))
+                        png = render_chart_png(candles, asset_symbol(w), aline=aline)
+                        images = [{"cid": "chart1", "data": png, "caption": ""}]
+                    except Exception as e:
+                        print(f"[watchlist] chart render failed: {e}")
+                        images = None
+                    send_email(gmail_user, gmail_pass, to_addr, subject, body, images=images)
+                    print(f"[watchlist] sent: {w['label']} trendline({tl['kind']}) @ {line_now:.4g} (current {current})")
                 except Exception as e:
                     print(f"[watchlist] email send failed: {e}")
 
