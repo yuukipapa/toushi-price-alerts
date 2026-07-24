@@ -17,8 +17,8 @@ import time
 import requests
 
 from main import (
-    DB_URL, describe_level_context, describe_trendline_context, detect_levels, detect_trendlines,
-    fetch_stock_candles, render_chart_png, send_email, trendline_price_at,
+    DB_URL, body_wick_note, describe_level_context, describe_trendline_context, detect_levels,
+    detect_trendlines, fetch_stock_candles, render_chart_png, send_email, trendline_price_at,
 )
 from nikkei225 import NIKKEI225
 
@@ -78,8 +78,11 @@ def find_near_support(ysym: str, label: str) -> list:
 
 def build_reason(hit: dict) -> str:
     if hit["line_type"] == "trend":
-        return describe_trendline_context(hit["current"], hit["price"], hit["touches"], hit["kind"])
-    return describe_level_context(hit["current"], hit["price"], hit["touches"], hit["kind"])
+        reason = describe_trendline_context(hit["current"], hit["price"], hit["touches"], hit["kind"])
+    else:
+        reason = describe_level_context(hit["current"], hit["price"], hit["touches"], hit["kind"])
+    bw = body_wick_note(hit["candles"], hit["price"])
+    return reason + ("\n  " + bw if bw else "")
 
 
 def main() -> None:

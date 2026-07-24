@@ -329,6 +329,44 @@ def send_email(gmail_user: str, gmail_pass: str, to_addr: str, subject: str, bod
 
 # ── 通知文の生成(水平線トレードの考え方に沿った根拠を書く) ──
 
+def fetch_candles_for(entry: dict) -> list:
+    if entry.get("assetType") == "stock":
+        return fetch_stock_candles(entry["ysym"])
+    if entry.get("assetType") == "fund":
+        return fetch_fund_candles(entry["isin"], entry["assoc"])
+    if entry.get("assetType") == "crypto":
+        return fetch_crypto_candles(entry["sym"])
+    raise ValueError(f"unknown assetType: {entry.get('assetType')}")
+
+
+def body_wick_note(candles: list, line_price: float) -> str:
+    # 「ヒゲで超えても実体(終値)で維持できなければ無効」という教材の考え方を判定する。
+    # candles[-1](最新)は週の途中など未確定の可能性があるため、必ず直近の"確定している"
+    # candles[-2] を基準に判定し、進行中の足については別途注意書きを添える。
+    if len(candles) < 3 or line_price <= 0:
+        return ""
+    prev_close = candles[-3]["c"]
+    last = candles[-2]
+    c, h, l = last["c"], last["h"], last["l"]
+    was_above = prev_close >= line_price
+    now_above = c >= line_price
+    if was_above == now_above:
+        if was_above and l < line_price:
+            body_txt = "直近の確定足はヒゲで下に触れましたが、終値(実体)は上を維持しました(まだ抵抗/支持として有効)。"
+        elif not was_above and h > line_price:
+            body_txt = "直近の確定足はヒゲで上に触れましたが、終値(実体)は下を維持しました(まだ抵抗/支持として有効)。"
+        else:
+            body_txt = "直近の確定足は実体・ヒゲとも同じ側を維持しています。"
+    else:
+        direction = "上に" if now_above else "下に"
+        body_txt = f"直近の確定足は終値(実体)でも{direction}確定して通過済みです。"
+    return (
+        body_txt
+        + " ※直近の足(進行中の場合あり)による今の価格はまだ確定していない可能性があるため、"
+        + "実体で確定するまでは判断を急がないでください。"
+    )
+
+
 def describe_cross(direction: str, is_trend: bool, note: str) -> str:
     line_type = "斜め線(トレンドライン)" if is_trend else "水平線"
     if direction == "up":  # 下から上に抜けた(ブレイクアウト/レジサポ転換の入口)
@@ -446,9 +484,19 @@ def check_alerts(doc: dict, gmail_user: str, gmail_pass: str) -> bool:
             changed = True
             if to_addr:
                 try:
+                    try:
+                        alert_candles = fetch_candles_for(a)
+                    except Exception as e:
+                        print(f"[alerts] candle fetch for body/wick check failed: {e}")
+                        alert_candles = None
+
                     subject = f"🔔 価格アラート: {a['label']} が {line_desc} を通過"
                     direction = "up" if side == "above" else "down"
                     reason = describe_cross(direction, is_trend, a.get("note") or "")
+                    if alert_candles:
+                        bw = body_wick_note(alert_candles, line_price)
+                        if bw:
+                            reason += "\n\n" + bw
                     body = (
                         f"{a['label']} の価格が、設定していたライン {line_desc} を通過しました。\n\n"
                         f"現在価格: {price}\n\n"
@@ -456,7 +504,7 @@ def check_alerts(doc: dict, gmail_user: str, gmail_pass: str) -> bool:
                         "チャートツールで確認: https://wyujiro-toushi-chart.web.app\n\n"
                         "※ これは投資助言ではありません。売買の最終判断は自分で行ってください。"
                     )
-                    images = _render_alert_chart(a, is_trend, line_price)
+                    images = _render_alert_chart(a, is_trend, line_price, alert_candles)
                     send_email(gmail_user, gmail_pass, to_addr, subject, body, images=images)
                     print(f"[alerts] sent: {a['label']} {line_desc}")
                 except Exception as e:
@@ -467,17 +515,11 @@ def check_alerts(doc: dict, gmail_user: str, gmail_pass: str) -> bool:
     return changed
 
 
-def _render_alert_chart(a: dict, is_trend: bool, line_price: float) -> list:
+def _render_alert_chart(a: dict, is_trend: bool, line_price: float, candles: list = None) -> list:
     # 通知するときだけ過去足を取得してチャート画像を作る(毎回のチェックでは取得しない)
     try:
-        if a.get("assetType") == "stock":
-            candles = fetch_stock_candles(a["ysym"])
-        elif a.get("assetType") == "fund":
-            candles = fetch_fund_candles(a["isin"], a["assoc"])
-        elif a.get("assetType") == "crypto":
-            candles = fetch_crypto_candles(a["sym"])
-        else:
-            return None
+        if candles is None:
+            candles = fetch_candles_for(a)
         if is_trend:
             now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
             aline = ((a["t1"], a["p1"]), (now_ms, line_price))
@@ -565,6 +607,9 @@ def check_watchlist(doc: dict, gmail_user: str, gmail_pass: str) -> bool:
                     kind_label = {"ath": "上場来高値(ATH)", "lv": f"{lv['touches']}回反応の水平線"}.get(lv["kind"], "水平線")
                     subject = f"👁 ウォッチ通知: {w['label']} が {kind_label}({lv['price']:.4g})に接近"
                     reason = describe_level_context(current, lv["price"], lv["touches"], lv["kind"])
+                    bw = body_wick_note(candles, lv["price"])
+                    if bw:
+                        reason += "\n\n" + bw
                     body = (
                         f"{w['label']} の価格が、自動検出した{kind_label} {lv['price']:.4g} の"
                         f"±{NEAR_PCT * 100:.0f}%以内に近づきました。\n\n"
@@ -612,6 +657,9 @@ def check_watchlist(doc: dict, gmail_user: str, gmail_pass: str) -> bool:
                     kind_label = "斜めの支持線" if tl["kind"] == "sup" else "斜めの抵抗線"
                     subject = f"👁 ウォッチ通知: {w['label']} が {kind_label}({line_now:.4g})に接近"
                     reason = describe_trendline_context(current, line_now, tl["touches"], tl["kind"])
+                    bw = body_wick_note(candles, line_now)
+                    if bw:
+                        reason += "\n\n" + bw
                     body = (
                         f"{w['label']} の価格が、自動検出した{kind_label}(現在値換算 {line_now:.4g})の"
                         f"±{NEAR_PCT * 100:.0f}%以内に近づきました。\n\n"
