@@ -1,11 +1,16 @@
 # toushi-price-alerts
 
-[chart_check.html](../tools/chart_check.html) の水平線チャートツール用の通知バックエンド。2つのスクリプトがある。
+[chart_check.html](../tools/chart_check.html) の水平線チャートツール用の通知バックエンド。3つのスクリプトがある。
 
 - **main.py**(5分おき): 🔔設定した価格アラート・👁ウォッチリスト(自動線引き)をチェックし、
   価格がラインを通過/接近したらGmail経由でメール通知
 - **market_scan.py**(1日1回・朝6:00 JST): 日経225 + 🔔/👁登録中の株式銘柄を週足でスキャンし、
-  支持線に接近している銘柄を反応回数の多い順に上位だけダイジェストメールで知らせる
+  支持線(水平線・トレンドラインのどちらか)に接近している銘柄を反応回数の多い順に上位だけダイジェストメールで知らせる
+- **confluence_scan.py**(1日1回・朝6:10 JST): 主要指数(S&P500・NYダウ・NASDAQ・日経225・ハンセン・DAX・金)+
+  主要仮想通貨(BTC/ETH/SOL/XRP)を週足でスキャンし、**トレンドライン(直近の安値を結んだ上昇支持線)と
+  水平線が交わる付近まで、上から価格が下げてきている**(分析メモ・じんのNotionコラムでいう
+  「カチカチだから反発する」セットアップ)銘柄だけをチャート画像つきでメール通知。market_scan.pyと違い
+  「水平線かトレンドラインのどちらか」ではなく「両方が交わっている」ことを条件にする、より絞り込んだスキャン
 
 データは共通してFirebase Realtime DB(`/toushi_alerts/<ALERT_KEY>`)に保存されている。
 このリポジトリは公開(public)なので、鍵・パスワードはコードに書かず、
@@ -17,8 +22,10 @@
    - `ALERT_KEY` — chart_check.html の `ALERT_SYNC.key` と同じ値
    - `GMAIL_USER` — 通知メールの送信元Gmailアドレス
    - `GMAIL_APP_PASSWORD` — そのGmailの[アプリパスワード](https://myaccount.google.com/apppasswords)(2段階認証が必要)
-2. Actionsタブで `Check price alerts` と `Daily market scan` を一度ずつ `Run workflow`(workflow_dispatch)して、正常終了することを確認
-3. 以降は自動実行される(`.github/workflows/check_price_alerts.yml` = 5分おき、`.github/workflows/market_scan.yml` = 1日1回)
+2. Actionsタブで `Check price alerts`・`Daily market scan`・`Daily confluence scan` を一度ずつ
+   `Run workflow`(workflow_dispatch)して、正常終了することを確認
+3. 以降は自動実行される(`.github/workflows/check_price_alerts.yml` = 5分おき、
+   `.github/workflows/market_scan.yml` = 1日1回6:00、`.github/workflows/confluence_scan.yml` = 1日1回6:10)
 
 ## ローカルでテストする場合
 
@@ -26,6 +33,8 @@
 pip install -r requirements.txt
 ALERT_KEY=xxx GMAIL_USER=xxx GMAIL_APP_PASSWORD=xxx python main.py
 ALERT_KEY=xxx GMAIL_USER=xxx GMAIL_APP_PASSWORD=xxx python market_scan.py
+ALERT_KEY=xxx GMAIL_USER=xxx GMAIL_APP_PASSWORD=xxx python confluence_scan.py
 ```
 
 market_scan.py は日経225の225銘柄を1つずつ取得するため、ローカル実行では数分かかる。
+confluence_scan.py は主要指数・仮想通貨11銘柄のみなので数十秒で終わる。
