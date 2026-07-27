@@ -155,7 +155,6 @@ def main() -> None:
             images.append({"cid": f"chart{i}", "data": png, "caption": f"<b>{h['label']}</b>"})
         except Exception as e:
             print(f"[scan] chart render failed for {h['label']}: {e}")
-    lines.append(f"チャートツールで確認: {CHART_TOOL_URL}")
 
     body = "\n".join(lines)
     subject = f"📊 今日の支持線接近スキャン: {top[0]['label']}など{len(top)}件"

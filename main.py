@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from urllib.parse import quote
 
 import mplfinance as mpf
 import pandas as pd
@@ -30,6 +31,7 @@ import requests
 from curl_cffi import requests as cffi_requests
 
 DB_URL = "https://routine-sync-7029e-default-rtdb.asia-southeast1.firebasedatabase.app"
+CHART_TOOL_URL = "https://wyujiro-toushi-chart.web.app"
 NEAR_PCT = 0.01       # ウォッチリスト: 線の±1%に近づいたら通知
 COOLDOWN_HOURS = 24    # 同じ線について再通知するまでの間隔
 
@@ -254,6 +256,22 @@ def asset_symbol(entry: dict) -> str:
     # GitHub Actionsのランナーには日本語フォントが無く、チャート画像内のタイトルに
     # 日本語ラベルを使うと文字が表示されない(tofu化する)ため、ASCIIのティッカーを使う
     return entry.get("ysym") or entry.get("sym") or entry.get("isin") or entry.get("assetKey") or "?"
+
+
+def chart_link(entry: dict, tf: str = "1w") -> str:
+    """メール内のリンクから、その銘柄の最新チャートを自動線引き済みで直接開くためのURL。
+    entry は stock(ysym) / crypto(sym) / fund(isin+assoc) のいずれかの形式(alerts/watchlistと同じ)。"""
+    label = entry.get("label") or asset_symbol(entry)
+    params = {"label": label, "tf": tf}
+    if entry.get("ysym"):
+        params["ysym"] = entry["ysym"]
+    elif entry.get("sym"):
+        params["sym"] = entry["sym"]
+    elif entry.get("isin"):
+        params["isin"] = entry["isin"]
+        params["assoc"] = entry.get("assoc") or ""
+    query = "&".join(f"{k}={quote(str(v))}" for k, v in params.items())
+    return f"{CHART_TOOL_URL}/?{query}"
 
 
 
@@ -501,7 +519,7 @@ def check_alerts(doc: dict, gmail_user: str, gmail_pass: str) -> bool:
                         f"{a['label']} の価格が、設定していたライン {line_desc} を通過しました。\n\n"
                         f"現在価格: {price}\n\n"
                         f"【この通知の根拠】\n{reason}\n\n"
-                        "チャートツールで確認: https://wyujiro-toushi-chart.web.app\n\n"
+                        f"最新チャートを見る: {chart_link(a)}\n\n"
                         "※ これは投資助言ではありません。売買の最終判断は自分で行ってください。"
                     )
                     images = _render_alert_chart(a, is_trend, line_price, alert_candles)
@@ -615,7 +633,7 @@ def check_watchlist(doc: dict, gmail_user: str, gmail_pass: str) -> bool:
                         f"±{NEAR_PCT * 100:.0f}%以内に近づきました。\n\n"
                         f"現在価格: {current}\n\n"
                         f"【この通知の根拠】\n{reason}\n\n"
-                        "チャートツールで確認: https://wyujiro-toushi-chart.web.app\n\n"
+                        f"最新チャートを見る: {chart_link(w)}\n\n"
                         "※ これは投資助言ではありません。売買の最終判断は自分で行ってください。"
                     )
                     try:
@@ -665,7 +683,7 @@ def check_watchlist(doc: dict, gmail_user: str, gmail_pass: str) -> bool:
                         f"±{NEAR_PCT * 100:.0f}%以内に近づきました。\n\n"
                         f"現在価格: {current}\n\n"
                         f"【この通知の根拠】\n{reason}\n\n"
-                        "チャートツールで確認: https://wyujiro-toushi-chart.web.app\n\n"
+                        f"最新チャートを見る: {chart_link(w)}\n\n"
                         "※ これは投資助言ではありません。売買の最終判断は自分で行ってください。"
                     )
                     try:

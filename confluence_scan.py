@@ -25,7 +25,7 @@ import os
 
 import requests
 
-from main import DB_URL, asset_symbol, fetch_candles_for, find_pivots, render_chart_png, send_email
+from main import DB_URL, asset_symbol, chart_link, fetch_candles_for, find_pivots, render_chart_png, send_email
 
 LINES_GAP_PCT = 0.03    # トレンドラインと水平線が「交わっている」とみなす近さ
 NOW_GAP_PCT = 0.05      # 現在値が交点圏内にあるとみなす近さ
@@ -193,6 +193,7 @@ def main() -> None:
         entry = h["entry"]
         lines.append(f"■ {entry['label']}")
         lines.append("  " + build_reason(h))
+        lines.append("  最新チャートを見る: " + chart_link(entry))
         lines.append("")
         try:
             tl = h["tl"]
@@ -201,7 +202,6 @@ def main() -> None:
             images.append({"cid": f"chart{i}", "data": png, "caption": f"<b>{entry['label']}</b>"})
         except Exception as e:
             print(f"[confluence] chart render failed for {entry['label']}: {e}")
-    lines.append("チャートツールで確認: https://wyujiro-toushi-chart.web.app")
 
     body = "\n".join(lines)
     subject = f"📏 トレンドライン×水平線の交点: {hits[0]['entry']['label']}など{len(hits)}件"
