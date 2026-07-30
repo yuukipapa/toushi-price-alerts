@@ -412,16 +412,16 @@ def jst_today_str() -> str:
 def push_scan_history(alert_key: str, scan_type: str, date_str: str, items: list) -> None:
     """1日分のスキャン結果(見出し・本文・チャート画像)をFirebase RTDBに保存する。
     scan_type: "market" または "confluence"。
-    items: [{"label", "reason", "chart_link", "png": bytes|None}, ...]
-    chart_check.html の「📊 スキャン履歴」タブが同じパスをGETしてWEB上に一覧表示する。
+    items: send_digest_email() と同じ形式 [{"header", "text", "chart_link", "png": bytes|None}, ...]
+    chart_check.html の「📊 履歴」タブが同じパスをGETしてWEB上に一覧表示する。
     """
     base = f"{DB_URL}/toushi_alerts/{alert_key}/scanHistory/{scan_type}"
     day_payload = {
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "items": [
             {
-                "label": it["label"],
-                "reason": it["reason"],
+                "label": it["header"],
+                "reason": it["text"],
                 "chartLink": it["chart_link"],
                 "chartB64": base64.b64encode(it["png"]).decode("ascii") if it.get("png") else None,
             }

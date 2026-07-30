@@ -16,6 +16,15 @@
 このリポジトリは公開(public)なので、鍵・パスワードはコードに書かず、
 すべて **GitHub Secrets** から環境変数として読む。
 
+market_scan.py・confluence_scan.pyは、メール送信に加えて`push_scan_history()`で
+その日の結果(見出し・根拠文・チャート画像)を`/toushi_alerts/<ALERT_KEY>/scanHistory/market|confluence/`
+以下にも保存する(直近30日分を保持し、古い日は自動削除)。この履歴は
+[chart_check.html](../tools/chart_check.html)の「📊 履歴」タブから日付ごとに閲覧できる
+(WEB版: https://wyujiro-toushi-chart.web.app )。
+またmarket_scan.py・confluence_scan.pyのメールは、`send_digest_email()`により
+「見出し→本文→その銘柄のチャート画像」の順で銘柄ごとに並ぶ(以前は全銘柄の文章の後に画像が
+まとめて貼られていた)。
+
 ## 初期セットアップ(1回だけ)
 
 1. このリポジトリの Settings → Secrets and variables → Actions で以下の3つを登録:
