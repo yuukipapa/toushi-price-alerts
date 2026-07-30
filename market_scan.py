@@ -19,7 +19,8 @@ import requests
 
 from main import (
     DB_URL, body_wick_note, describe_level_context, describe_trendline_context, detect_levels,
-    detect_trendlines, fetch_stock_candles, render_chart_png, send_email, trendline_price_at,
+    detect_trendlines, fetch_stock_candles, jst_today_str, push_scan_history, render_chart_png,
+    send_digest_email, trendline_price_at,
 )
 from nikkei225 import NIKKEI225
 
@@ -131,38 +132,45 @@ def main() -> None:
     if not top:
         print("no candidates today, skipping email")
         return
-    if not to_addr:
-        print("notifyEmail not set, skipping email")
-        return
 
-    lines = [
+    intro_lines = [
         "今日の週足スキャンで、支持線に接近している銘柄です(反応回数が多い順)。",
         "※ 学習メモの考え方に沿った機械的な抽出であり、投資助言ではありません。",
-        "",
     ]
-    images = []
-    for i, h in enumerate(top):
-        lines.append(f"■ {h['label']} ({h['ysym'].replace('.T', '')})")
-        lines.append("  " + build_reason(h))
-        lines.append("  最新チャートを見る: " + chart_link(h["ysym"], h["label"]))
-        lines.append("")
+    items = []
+    for h in top:
+        link = chart_link(h["ysym"], h["label"])
         try:
             if h["line_type"] == "trend":
                 aline = ((h["candles"][h["i1"]]["t"], h["p1"]), (h["candles"][-1]["t"], h["price"]))
                 png = render_chart_png(h["candles"], h["ysym"], aline=aline)
             else:
                 png = render_chart_png(h["candles"], h["ysym"], hline=h["price"])
-            images.append({"cid": f"chart{i}", "data": png, "caption": f"<b>{h['label']}</b>"})
         except Exception as e:
             print(f"[scan] chart render failed for {h['label']}: {e}")
+            png = None
+        items.append({
+            "header": f"■ {h['label']} ({h['ysym'].replace('.T', '')})",
+            "text": build_reason(h),
+            "chart_link": link,
+            "png": png,
+        })
 
-    body = "\n".join(lines)
     subject = f"📊 今日の支持線接近スキャン: {top[0]['label']}など{len(top)}件"
+    if to_addr:
+        try:
+            send_digest_email(gmail_user, gmail_pass, to_addr, subject, intro_lines, items)
+            print("sent digest email")
+        except Exception as e:
+            print(f"email send failed: {e}")
+    else:
+        print("notifyEmail not set, skipping email")
+
     try:
-        send_email(gmail_user, gmail_pass, to_addr, subject, body, images=images or None)
-        print("sent digest email")
+        push_scan_history(alert_key, "market", jst_today_str(), items)
+        print("saved scan history")
     except Exception as e:
-        print(f"email send failed: {e}")
+        print(f"scan history save failed: {e}")
 
 
 if __name__ == "__main__":

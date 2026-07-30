@@ -13,13 +13,14 @@ chart_check.html 側の ALERT_SYNC と同じ形式で保存されている。
 すべて環境変数(GitHub Secrets経由)から読む。
 必要な環境変数: ALERT_KEY, GMAIL_USER, GMAIL_APP_PASSWORD
 """
+import base64
 import io
 import math
 import os
 import re
 import smtplib
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -343,6 +344,108 @@ def send_email(gmail_user: str, gmail_pass: str, to_addr: str, subject: str, bod
         server.starttls()
         server.login(gmail_user, gmail_pass)
         server.sendmail(gmail_user, [to_addr], msg.as_string())
+
+
+def send_digest_email(
+    gmail_user: str, gmail_pass: str, to_addr: str, subject: str, intro_lines: list, items: list
+) -> None:
+    """market_scan.py / confluence_scan.py 用の複数銘柄まとめメール。
+
+    send_email() は「本文をまとめて書いた後に画像を全部貼る」形だったため、銘柄が複数あると
+    「1件目の文章→2件目の文章→…→末尾に画像が全部並ぶ」というズレた見た目になっていた。
+    この関数は items を1件ずつ「見出し→本文→(あれば)その銘柄のチャート画像」の順で並べてから
+    次の銘柄に進む、という自然な流れでHTMLを組み立てる。
+
+    items: [{"header": str, "text": str, "chart_link": str, "png": bytes|None}, ...]
+    """
+    plain_lines = list(intro_lines)
+    html_parts = ["<br>\n".join(intro_lines).replace("\n", "<br>\n")]
+    images = []
+    for i, item in enumerate(items):
+        plain_lines += ["", item["header"], "  " + item["text"].replace("\n", "\n  "),
+                         "  最新チャートを見る: " + item["chart_link"]]
+        block = (
+            f'<p style="margin:18px 0 4px"><b>{item["header"]}</b></p>'
+            f'<p style="margin:0 0 6px">{item["text"].replace(chr(10), "<br>")}</p>'
+            f'<p style="margin:0 0 6px"><a href="{item["chart_link"]}">最新チャートを見る</a></p>'
+        )
+        if item.get("png"):
+            cid = f"chart{i}"
+            block += f'<img src="cid:{cid}" style="max-width:640px"><br>\n'
+            images.append({"cid": cid, "data": item["png"]})
+        html_parts.append(block)
+
+    body = "\n".join(plain_lines)
+    html_body = "\n".join(html_parts)
+
+    msg = MIMEMultipart("related")
+    msg["Subject"] = subject
+    msg["From"] = gmail_user
+    msg["To"] = to_addr
+
+    alt = MIMEMultipart("alternative")
+    alt.attach(MIMEText(body, "plain"))
+    alt.attach(MIMEText(html_body, "html"))
+    msg.attach(alt)
+
+    for img in images:
+        mime_img = MIMEImage(img["data"])
+        mime_img.add_header("Content-ID", f"<{img['cid']}>")
+        mime_img.add_header("Content-Disposition", "inline", filename=f"{img['cid']}.png")
+        msg.attach(mime_img)
+
+    with smtplib.SMTP("smtp.gmail.com", 587) as server:
+        server.starttls()
+        server.login(gmail_user, gmail_pass)
+        server.sendmail(gmail_user, [to_addr], msg.as_string())
+
+
+# ── 日次スキャン履歴の保存(Firebase RTDB。WEBの「📊 スキャン履歴」タブから読む) ──
+
+SCAN_HISTORY_KEEP_DAYS = 30  # 何日分の履歴を残すか(それより古い日は削除してDBを肥大化させない)
+
+
+def jst_today_str() -> str:
+    return (datetime.now(timezone.utc) + timedelta(hours=9)).date().isoformat()
+
+
+def push_scan_history(alert_key: str, scan_type: str, date_str: str, items: list) -> None:
+    """1日分のスキャン結果(見出し・本文・チャート画像)をFirebase RTDBに保存する。
+    scan_type: "market" または "confluence"。
+    items: [{"label", "reason", "chart_link", "png": bytes|None}, ...]
+    chart_check.html の「📊 スキャン履歴」タブが同じパスをGETしてWEB上に一覧表示する。
+    """
+    base = f"{DB_URL}/toushi_alerts/{alert_key}/scanHistory/{scan_type}"
+    day_payload = {
+        "generatedAt": datetime.now(timezone.utc).isoformat(),
+        "items": [
+            {
+                "label": it["label"],
+                "reason": it["reason"],
+                "chartLink": it["chart_link"],
+                "chartB64": base64.b64encode(it["png"]).decode("ascii") if it.get("png") else None,
+            }
+            for it in items
+        ],
+    }
+    requests.put(f"{base}/days/{date_str}.json", json=day_payload, timeout=15).raise_for_status()
+
+    idx_res = requests.get(f"{base}/index.json", timeout=10)
+    idx_res.raise_for_status()
+    index = idx_res.json() or []
+    if date_str not in index:
+        index.append(date_str)
+    index.sort()
+
+    removed = index[: max(0, len(index) - SCAN_HISTORY_KEEP_DAYS)]
+    index = index[len(removed):]
+    for old_date in removed:
+        try:
+            requests.delete(f"{base}/days/{old_date}.json", timeout=10)
+        except Exception as e:
+            print(f"[scan-history] failed to prune {scan_type}/{old_date}: {e}")
+
+    requests.put(f"{base}/index.json", json=index, timeout=10).raise_for_status()
 
 
 # ── 通知文の生成(水平線トレードの考え方に沿った根拠を書く) ──

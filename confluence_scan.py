@@ -25,7 +25,10 @@ import os
 
 import requests
 
-from main import DB_URL, asset_symbol, chart_link, fetch_candles_for, find_pivots, render_chart_png, send_email
+from main import (
+    DB_URL, asset_symbol, chart_link, fetch_candles_for, find_pivots, jst_today_str,
+    push_scan_history, render_chart_png, send_digest_email,
+)
 
 LINES_GAP_PCT = 0.03    # トレンドラインと水平線が「交わっている」とみなす近さ
 NOW_GAP_PCT = 0.05      # 現在値が交点圏内にあるとみなす近さ
@@ -179,37 +182,43 @@ def main() -> None:
     if not hits:
         print("no confluence today, skipping email")
         return
-    if not to_addr:
-        print("notifyEmail not set, skipping email")
-        return
 
-    lines = [
+    intro_lines = [
         "主要指数・仮想通貨の週足で「トレンドラインと水平線の交点」に価格が接近している銘柄です。",
         "※ 学習メモの考え方に沿った機械的な抽出であり、投資助言ではありません。",
-        "",
     ]
-    images = []
-    for i, h in enumerate(hits):
+    items = []
+    for h in hits:
         entry = h["entry"]
-        lines.append(f"■ {entry['label']}")
-        lines.append("  " + build_reason(h))
-        lines.append("  最新チャートを見る: " + chart_link(entry))
-        lines.append("")
         try:
             tl = h["tl"]
             aline = ((h["candles"][tl["i1"]]["t"], tl["p1"]), (h["candles"][-1]["t"], tl["trend_val"]))
             png = render_chart_png(h["candles"], asset_symbol(entry), hline=h["level"]["price"], aline=aline)
-            images.append({"cid": f"chart{i}", "data": png, "caption": f"<b>{entry['label']}</b>"})
         except Exception as e:
             print(f"[confluence] chart render failed for {entry['label']}: {e}")
+            png = None
+        items.append({
+            "header": f"■ {entry['label']}",
+            "text": build_reason(h),
+            "chart_link": chart_link(entry),
+            "png": png,
+        })
 
-    body = "\n".join(lines)
     subject = f"📏 トレンドライン×水平線の交点: {hits[0]['entry']['label']}など{len(hits)}件"
+    if to_addr:
+        try:
+            send_digest_email(gmail_user, gmail_pass, to_addr, subject, intro_lines, items)
+            print("sent confluence digest email")
+        except Exception as e:
+            print(f"email send failed: {e}")
+    else:
+        print("notifyEmail not set, skipping email")
+
     try:
-        send_email(gmail_user, gmail_pass, to_addr, subject, body, images=images or None)
-        print("sent confluence digest email")
+        push_scan_history(alert_key, "confluence", jst_today_str(), items)
+        print("saved scan history")
     except Exception as e:
-        print(f"email send failed: {e}")
+        print(f"scan history save failed: {e}")
 
 
 if __name__ == "__main__":
