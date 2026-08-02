@@ -190,10 +190,13 @@ def main() -> None:
     items = []
     for h in hits:
         entry = h["entry"]
+        tl = h["tl"]
+        aline = [[h["candles"][tl["i1"]]["t"], tl["p1"]], [h["candles"][-1]["t"], tl["trend_val"]]]
         try:
-            tl = h["tl"]
-            aline = ((h["candles"][tl["i1"]]["t"], tl["p1"]), (h["candles"][-1]["t"], tl["trend_val"]))
-            png = render_chart_png(h["candles"], asset_symbol(entry), hline=h["level"]["price"], aline=aline)
+            png = render_chart_png(
+                h["candles"], asset_symbol(entry),
+                hline=h["level"]["price"], aline=(tuple(aline[0]), tuple(aline[1])),
+            )
         except Exception as e:
             print(f"[confluence] chart render failed for {entry['label']}: {e}")
             png = None
@@ -202,6 +205,11 @@ def main() -> None:
             "text": build_reason(h),
             "chart_link": chart_link(entry),
             "png": png,
+            "asset_type": entry.get("assetType"),
+            "ysym": entry.get("ysym"),
+            "sym": entry.get("sym"),
+            "hline": h["level"]["price"],
+            "aline": aline,
         })
 
     subject = f"📏 トレンドライン×水平線の交点: {hits[0]['entry']['label']}など{len(hits)}件"

@@ -140,10 +140,12 @@ def main() -> None:
     items = []
     for h in top:
         link = chart_link(h["ysym"], h["label"])
+        aline = None
+        if h["line_type"] == "trend":
+            aline = [[h["candles"][h["i1"]]["t"], h["p1"]], [h["candles"][-1]["t"], h["price"]]]
         try:
-            if h["line_type"] == "trend":
-                aline = ((h["candles"][h["i1"]]["t"], h["p1"]), (h["candles"][-1]["t"], h["price"]))
-                png = render_chart_png(h["candles"], h["ysym"], aline=aline)
+            if aline:
+                png = render_chart_png(h["candles"], h["ysym"], aline=(tuple(aline[0]), tuple(aline[1])))
             else:
                 png = render_chart_png(h["candles"], h["ysym"], hline=h["price"])
         except Exception as e:
@@ -154,6 +156,10 @@ def main() -> None:
             "text": build_reason(h),
             "chart_link": link,
             "png": png,
+            "asset_type": "stock",
+            "ysym": h["ysym"],
+            "hline": h["price"] if h["line_type"] != "trend" else None,
+            "aline": aline,
         })
 
     subject = f"📊 今日の支持線接近スキャン: {top[0]['label']}など{len(top)}件"

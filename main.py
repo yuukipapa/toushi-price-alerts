@@ -412,7 +412,10 @@ def jst_today_str() -> str:
 def push_scan_history(alert_key: str, scan_type: str, date_str: str, items: list) -> None:
     """1日分のスキャン結果(見出し・本文・チャート画像)をFirebase RTDBに保存する。
     scan_type: "market" または "confluence"。
-    items: send_digest_email() と同じ形式 [{"header", "text", "chart_link", "png": bytes|None}, ...]
+    items: send_digest_email() と同じ形式に加えて、chart_check.html の「Before/After」比較用に
+    線の定義を構造化データとしても保持する(assetType/ysym/sym/hline/aline)。
+    aline は [[timestamp_ms, price], [timestamp_ms, price]] の絶対値形式なので、
+    将来の日付でも同じ線を再現できる(main.py render_chart_png() と同じ考え方)。
     chart_check.html の「📊 履歴」タブが同じパスをGETしてWEB上に一覧表示する。
     """
     base = f"{DB_URL}/toushi_alerts/{alert_key}/scanHistory/{scan_type}"
@@ -424,6 +427,11 @@ def push_scan_history(alert_key: str, scan_type: str, date_str: str, items: list
                 "reason": it["text"],
                 "chartLink": it["chart_link"],
                 "chartB64": base64.b64encode(it["png"]).decode("ascii") if it.get("png") else None,
+                "assetType": it.get("asset_type"),
+                "ysym": it.get("ysym"),
+                "sym": it.get("sym"),
+                "hline": it.get("hline"),
+                "aline": it.get("aline"),
             }
             for it in items
         ],
