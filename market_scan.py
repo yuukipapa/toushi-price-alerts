@@ -19,8 +19,8 @@ import requests
 
 from main import (
     DB_URL, body_wick_note, describe_level_context, describe_trendline_context, detect_levels,
-    detect_trendlines, fetch_stock_candles, jst_today_str, push_scan_history, render_chart_png,
-    send_digest_email, trendline_price_at,
+    detect_swing_curve, detect_trendlines, fetch_stock_candles, jst_today_str, push_scan_history,
+    render_chart_png, send_digest_email, trendline_price_at,
 )
 from nikkei225 import NIKKEI225
 
@@ -143,11 +143,13 @@ def main() -> None:
         aline = None
         if h["line_type"] == "trend":
             aline = [[h["candles"][h["i1"]]["t"], h["p1"]], [h["candles"][-1]["t"], h["price"]]]
+        recent = h["candles"][-60:]  # render_chart_png()のデフォルト表示本数(n=60)に合わせ、直近だけで曲線を作る
+        curves = [c for c in (detect_swing_curve(recent, "sup"), detect_swing_curve(recent, "res")) if c]
         try:
             if aline:
-                png = render_chart_png(h["candles"], h["ysym"], aline=(tuple(aline[0]), tuple(aline[1])))
+                png = render_chart_png(h["candles"], h["ysym"], aline=(tuple(aline[0]), tuple(aline[1])), curves=curves)
             else:
-                png = render_chart_png(h["candles"], h["ysym"], hline=h["price"])
+                png = render_chart_png(h["candles"], h["ysym"], hline=h["price"], curves=curves)
         except Exception as e:
             print(f"[scan] chart render failed for {h['label']}: {e}")
             png = None

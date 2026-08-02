@@ -26,8 +26,8 @@ import os
 import requests
 
 from main import (
-    DB_URL, asset_symbol, chart_link, fetch_candles_for, find_pivots, jst_today_str,
-    push_scan_history, render_chart_png, send_digest_email,
+    DB_URL, asset_symbol, chart_link, detect_swing_curve, fetch_candles_for, find_pivots,
+    jst_today_str, push_scan_history, render_chart_png, send_digest_email,
 )
 
 LINES_GAP_PCT = 0.03    # トレンドラインと水平線が「交わっている」とみなす近さ
@@ -192,10 +192,12 @@ def main() -> None:
         entry = h["entry"]
         tl = h["tl"]
         aline = [[h["candles"][tl["i1"]]["t"], tl["p1"]], [h["candles"][-1]["t"], tl["trend_val"]]]
+        recent = h["candles"][-60:]  # render_chart_png()のデフォルト表示本数(n=60)に合わせ、直近だけで曲線を作る
+        curves = [c for c in (detect_swing_curve(recent, "sup"), detect_swing_curve(recent, "res")) if c]
         try:
             png = render_chart_png(
                 h["candles"], asset_symbol(entry),
-                hline=h["level"]["price"], aline=(tuple(aline[0]), tuple(aline[1])),
+                hline=h["level"]["price"], aline=(tuple(aline[0]), tuple(aline[1])), curves=curves,
             )
         except Exception as e:
             print(f"[confluence] chart render failed for {entry['label']}: {e}")
