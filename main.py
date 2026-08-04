@@ -251,81 +251,6 @@ def trendline_price_at(tl: dict, i: float) -> float:
     return math.exp(math.log(p1) + slope * (i - i1))
 
 
-# ── 直近スイング高安を滑らかに結んだ支持線・抵抗線の曲線 ──
-# 2点だけの直線トレンドライン(detect_trendlines)と違い、割り込まれていない全スイング点を
-# 通る凸包をChaikinアルゴリズムで滑らかにしたもの。chart_check.htmlのdrawLines()に同じロジックあり。
-
-def lower_hull(points: list) -> list:
-    """(idx, price)点群の下側凸包 = どの安値にも割り込まれない、支持線候補列"""
-    pts = sorted(points)
-    hull = []
-    for p in pts:
-        while len(hull) >= 2:
-            o, a = hull[-2], hull[-1]
-            cross = (a[0] - o[0]) * (p[1] - o[1]) - (a[1] - o[1]) * (p[0] - o[0])
-            if cross <= 0:
-                hull.pop()
-            else:
-                break
-        hull.append(p)
-    return hull
-
-
-def upper_hull(points: list) -> list:
-    """上側凸包 = どの高値にも割り込まれない、抵抗線候補列(lower_hullの符号反転版)"""
-    pts = sorted(points)
-    hull = []
-    for p in pts:
-        while len(hull) >= 2:
-            o, a = hull[-2], hull[-1]
-            cross = (a[0] - o[0]) * (p[1] - o[1]) - (a[1] - o[1]) * (p[0] - o[0])
-            if cross >= 0:
-                hull.pop()
-            else:
-                break
-        hull.append(p)
-    return hull
-
-
-def chaikin_smooth(points: list, iterations: int = 4) -> list:
-    """折れ線の角を繰り返し切り取ることで滑らかにする(オーバーシュートしないので支持線・抵抗線に使いやすい)"""
-    pts = list(points)
-    for _ in range(iterations):
-        if len(pts) < 3:
-            break
-        new_pts = [pts[0]]
-        for i in range(len(pts) - 1):
-            x0, y0 = pts[i]
-            x1, y1 = pts[i + 1]
-            new_pts.append((0.75 * x0 + 0.25 * x1, 0.75 * y0 + 0.25 * y1))
-            new_pts.append((0.25 * x0 + 0.75 * x1, 0.25 * y0 + 0.75 * y1))
-        new_pts.append(pts[-1])
-        pts = new_pts
-    return pts
-
-
-def detect_swing_curve(candles: list, kind: str, k: int = 2):
-    """直近スイング安値(kind="sup")/高値(kind="res")を滑らかに結んだ支持線・抵抗線の曲線を求める。
-    戻り値は render_chart_png(curves=...) にそのまま渡せる [(timestamp_ms, price), ...] 形式、
-    条件を満たす点が足りない(3点未満)場合は None。"""
-    pivots = find_pivots(candles, k)
-    pts = [(p["i"], p["p"]) for p in pivots if p["hi"] == (kind == "res")]
-    if len(pts) < 3:
-        return None
-    hull = lower_hull(pts) if kind == "sup" else upper_hull(pts)
-    if len(hull) < 3:
-        return None
-
-    def idx_to_time(i: float) -> float:
-        lo = max(0, min(len(candles) - 1, int(math.floor(i))))
-        hi = min(len(candles) - 1, lo + 1)
-        frac = i - lo
-        return candles[lo]["t"] + frac * (candles[hi]["t"] - candles[lo]["t"])
-
-    hull_t = [(idx_to_time(i), p) for i, p in hull]
-    return chaikin_smooth(hull_t, iterations=4)
-
-
 # ── チャート画像の生成(通知メールに添付する用) ──
 
 def asset_symbol(entry: dict) -> str:
@@ -353,11 +278,8 @@ def chart_link(entry: dict, tf: str = "1w") -> str:
 
 def render_chart_png(
     candles: list, title: str, hline: float = None, aline: tuple = None,
-    curves: list = None, n: int = 60,
+    n: int = 60,
 ) -> bytes:
-    """curves: [[(timestamp_ms, price), ...], ...] (detect_swing_curve()の戻り値をそのまま渡せる)。
-    直近スイング高安を滑らかに結んだ支持線・抵抗線の曲線を、既存の直線(hline/aline、青)とは
-    別の色(赤)で重ね描きする。"""
     rows = candles[-n:]
     df = pd.DataFrame(rows)
     df["t"] = pd.to_datetime(df["t"], unit="ms")
@@ -382,39 +304,11 @@ def render_chart_png(
         kwargs["alines"] = dict(alines=[pts], colors=["#2962ff"], linewidths=[1.2])
 
     buf = io.BytesIO()
-    if curves:
-        # 曲線はrows内の点の数だけ細かい座標を打つ必要があり、alines(厳密な日付一致が必要)には
-        # 乗せられないため、mplfinanceの内部軸(ローソク足は0始まりの整数インデックス)を
-        # returnfig=True で取得し、直接ax.plot()で重ね描きする
-        fig, axlist = mpf.plot(
-            df, type="candle", style="yahoo", title=title, volume=False,
-            figsize=(7, 4), returnfig=True, **kwargs,
-        )
-        row_times = [r["t"] for r in rows]
-
-        def time_to_x(t_ms):
-            if t_ms <= row_times[0]:
-                return 0.0
-            if t_ms >= row_times[-1]:
-                return float(len(rows) - 1)
-            for idx in range(len(row_times) - 1):
-                if row_times[idx] <= t_ms <= row_times[idx + 1]:
-                    span = row_times[idx + 1] - row_times[idx]
-                    frac = (t_ms - row_times[idx]) / span if span else 0.0
-                    return idx + frac
-            return float(len(rows) - 1)
-
-        for curve in curves:
-            xs = [time_to_x(t) for t, _ in curve]
-            ys = [p for _, p in curve]
-            axlist[0].plot(xs, ys, color="#e53935", linewidth=2.2, solid_capstyle="round")
-        fig.savefig(buf, dpi=110, bbox_inches="tight")
-    else:
-        mpf.plot(
-            df, type="candle", style="yahoo", title=title, volume=False,
-            figsize=(7, 4), savefig=dict(fname=buf, dpi=110, bbox_inches="tight"),
-            **kwargs,
-        )
+    mpf.plot(
+        df, type="candle", style="yahoo", title=title, volume=False,
+        figsize=(7, 4), savefig=dict(fname=buf, dpi=110, bbox_inches="tight"),
+        **kwargs,
+    )
     buf.seek(0)
     return buf.getvalue()
 
