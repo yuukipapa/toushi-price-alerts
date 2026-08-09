@@ -129,49 +129,50 @@ def main() -> None:
     top = all_hits[:TOP_N]
     print(f"found {len(all_hits)} candidates, sending top {len(top)}")
 
+    items = []
     if not top:
         print("no candidates today, skipping email")
-        return
-
-    intro_lines = [
-        "今日の週足スキャンで、支持線に接近している銘柄です(反応回数が多い順)。",
-        "※ 学習メモの考え方に沿った機械的な抽出であり、投資助言ではありません。",
-    ]
-    items = []
-    for h in top:
-        link = chart_link(h["ysym"], h["label"])
-        aline = None
-        if h["line_type"] == "trend":
-            aline = [[h["candles"][h["i1"]]["t"], h["p1"]], [h["candles"][-1]["t"], h["price"]]]
-        try:
-            if aline:
-                png = render_chart_png(h["candles"], h["ysym"], aline=(tuple(aline[0]), tuple(aline[1])))
-            else:
-                png = render_chart_png(h["candles"], h["ysym"], hline=h["price"])
-        except Exception as e:
-            print(f"[scan] chart render failed for {h['label']}: {e}")
-            png = None
-        items.append({
-            "header": f"■ {h['label']} ({h['ysym'].replace('.T', '')})",
-            "text": build_reason(h),
-            "chart_link": link,
-            "png": png,
-            "asset_type": "stock",
-            "ysym": h["ysym"],
-            "hline": h["price"] if h["line_type"] != "trend" else None,
-            "aline": aline,
-        })
-
-    subject = f"📊 今日の支持線接近スキャン: {top[0]['label']}など{len(top)}件"
-    if to_addr:
-        try:
-            send_digest_email(gmail_user, gmail_pass, to_addr, subject, intro_lines, items)
-            print("sent digest email")
-        except Exception as e:
-            print(f"email send failed: {e}")
     else:
-        print("notifyEmail not set, skipping email")
+        intro_lines = [
+            "今日の週足スキャンで、支持線に接近している銘柄です(反応回数が多い順)。",
+            "※ 学習メモの考え方に沿った機械的な抽出であり、投資助言ではありません。",
+        ]
+        for h in top:
+            link = chart_link(h["ysym"], h["label"])
+            aline = None
+            if h["line_type"] == "trend":
+                aline = [[h["candles"][h["i1"]]["t"], h["p1"]], [h["candles"][-1]["t"], h["price"]]]
+            try:
+                if aline:
+                    png = render_chart_png(h["candles"], h["ysym"], aline=(tuple(aline[0]), tuple(aline[1])))
+                else:
+                    png = render_chart_png(h["candles"], h["ysym"], hline=h["price"])
+            except Exception as e:
+                print(f"[scan] chart render failed for {h['label']}: {e}")
+                png = None
+            items.append({
+                "header": f"■ {h['label']} ({h['ysym'].replace('.T', '')})",
+                "text": build_reason(h),
+                "chart_link": link,
+                "png": png,
+                "asset_type": "stock",
+                "ysym": h["ysym"],
+                "hline": h["price"] if h["line_type"] != "trend" else None,
+                "aline": aline,
+            })
 
+        subject = f"📊 今日の支持線接近スキャン: {top[0]['label']}など{len(top)}件"
+        if to_addr:
+            try:
+                send_digest_email(gmail_user, gmail_pass, to_addr, subject, intro_lines, items)
+                print("sent digest email")
+            except Exception as e:
+                print(f"email send failed: {e}")
+        else:
+            print("notifyEmail not set, skipping email")
+
+    # ヒット0件の日も履歴に残す(WEB側の「この日はヒットなしでした」表示に対応させるため、
+    # 早期returnせず必ずpush_scan_historyまで到達させる)
     try:
         push_scan_history(alert_key, "market", jst_today_str(), items)
         print("saved scan history")

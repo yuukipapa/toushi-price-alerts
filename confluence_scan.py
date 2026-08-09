@@ -179,49 +179,50 @@ def main() -> None:
 
     hits.sort(key=lambda h: h["lines_gap"] + h["now_gap"])
 
+    items = []
     if not hits:
         print("no confluence today, skipping email")
-        return
-
-    intro_lines = [
-        "主要指数・仮想通貨の週足で「トレンドラインと水平線の交点」に価格が接近している銘柄です。",
-        "※ 学習メモの考え方に沿った機械的な抽出であり、投資助言ではありません。",
-    ]
-    items = []
-    for h in hits:
-        entry = h["entry"]
-        tl = h["tl"]
-        aline = [[h["candles"][tl["i1"]]["t"], tl["p1"]], [h["candles"][-1]["t"], tl["trend_val"]]]
-        try:
-            png = render_chart_png(
-                h["candles"], asset_symbol(entry),
-                hline=h["level"]["price"], aline=(tuple(aline[0]), tuple(aline[1])),
-            )
-        except Exception as e:
-            print(f"[confluence] chart render failed for {entry['label']}: {e}")
-            png = None
-        items.append({
-            "header": f"■ {entry['label']}",
-            "text": build_reason(h),
-            "chart_link": chart_link(entry),
-            "png": png,
-            "asset_type": entry.get("assetType"),
-            "ysym": entry.get("ysym"),
-            "sym": entry.get("sym"),
-            "hline": h["level"]["price"],
-            "aline": aline,
-        })
-
-    subject = f"📏 トレンドライン×水平線の交点: {hits[0]['entry']['label']}など{len(hits)}件"
-    if to_addr:
-        try:
-            send_digest_email(gmail_user, gmail_pass, to_addr, subject, intro_lines, items)
-            print("sent confluence digest email")
-        except Exception as e:
-            print(f"email send failed: {e}")
     else:
-        print("notifyEmail not set, skipping email")
+        intro_lines = [
+            "主要指数・仮想通貨の週足で「トレンドラインと水平線の交点」に価格が接近している銘柄です。",
+            "※ 学習メモの考え方に沿った機械的な抽出であり、投資助言ではありません。",
+        ]
+        for h in hits:
+            entry = h["entry"]
+            tl = h["tl"]
+            aline = [[h["candles"][tl["i1"]]["t"], tl["p1"]], [h["candles"][-1]["t"], tl["trend_val"]]]
+            try:
+                png = render_chart_png(
+                    h["candles"], asset_symbol(entry),
+                    hline=h["level"]["price"], aline=(tuple(aline[0]), tuple(aline[1])),
+                )
+            except Exception as e:
+                print(f"[confluence] chart render failed for {entry['label']}: {e}")
+                png = None
+            items.append({
+                "header": f"■ {entry['label']}",
+                "text": build_reason(h),
+                "chart_link": chart_link(entry),
+                "png": png,
+                "asset_type": entry.get("assetType"),
+                "ysym": entry.get("ysym"),
+                "sym": entry.get("sym"),
+                "hline": h["level"]["price"],
+                "aline": aline,
+            })
 
+        subject = f"📏 トレンドライン×水平線の交点: {hits[0]['entry']['label']}など{len(hits)}件"
+        if to_addr:
+            try:
+                send_digest_email(gmail_user, gmail_pass, to_addr, subject, intro_lines, items)
+                print("sent confluence digest email")
+            except Exception as e:
+                print(f"email send failed: {e}")
+        else:
+            print("notifyEmail not set, skipping email")
+
+    # ヒット0件の日も履歴に残す(WEB側の「この日はヒットなしでした」表示に対応させるため、
+    # 早期returnせず必ずpush_scan_historyまで到達させる)
     try:
         push_scan_history(alert_key, "confluence", jst_today_str(), items)
         print("saved scan history")
