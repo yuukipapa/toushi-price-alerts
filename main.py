@@ -842,7 +842,9 @@ def main() -> None:
         print("no changes")
         return
 
-    requests.put(doc_url, json=doc, timeout=10)
+    # PUTだとこの直前のGET以降に他プロセス(market_scan/confluence_scan)がscanHistoryへ書き込んでいた場合に
+    # 上書きで消してしまう。PATCHならdocに含まれるフィールドだけを更新し、他は触らないため安全。
+    requests.patch(doc_url, json=doc, timeout=10)
     print("saved changes")
 
 
