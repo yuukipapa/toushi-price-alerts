@@ -173,6 +173,29 @@ def find_pivots(candles: list, k: int) -> list:
     return pivots
 
 
+def rsi(candles: list, period: int = 14) -> float | None:
+    """週足終値ベースのRSI(Wilderの平滑化)。直近の値を返す。データが足りなければNone。"""
+    closes = [c["c"] for c in candles]
+    if len(closes) < period + 1:
+        return None
+    gains, losses = [], []
+    for i in range(1, period + 1):
+        diff = closes[i] - closes[i - 1]
+        gains.append(max(diff, 0.0))
+        losses.append(max(-diff, 0.0))
+    avg_gain = sum(gains) / period
+    avg_loss = sum(losses) / period
+    for i in range(period + 1, len(closes)):
+        diff = closes[i] - closes[i - 1]
+        gain, loss = max(diff, 0.0), max(-diff, 0.0)
+        avg_gain = (avg_gain * (period - 1) + gain) / period
+        avg_loss = (avg_loss * (period - 1) + loss) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+
 def detect_levels(candles: list, k: int = 2) -> list:
     n = len(candles)
     if n < 30:
