@@ -101,12 +101,14 @@ def active_support_trendline(candles: list) -> dict | None:
     return {"i1": x1, "p1": y1, "i2": x2, "p2": y2, "trend_val": trend_val, "touches": len(hull)}
 
 
-def find_confluence(entry: dict) -> dict | None:
-    candles = fetch_candles_for(entry)
+def find_confluence_in_candles(candles: list, current: float | None = None) -> dict | None:
+    """トレンドライン×水平線の交点判定の本体。candlesは取得済みのものを渡す形にして、
+    market_scan.py側の227銘柄スキャンからも(二重にAPI取得せず)同じ判定を呼べるようにしている。"""
     n = len(candles)
     if n < 30:
         return None
-    current = candles[-1]["c"]
+    if current is None:
+        current = candles[-1]["c"]
 
     tl = active_support_trendline(candles)
     if tl is None or tl["trend_val"] <= 0:
@@ -135,9 +137,18 @@ def find_confluence(entry: dict) -> dict | None:
         return None
 
     return {
-        "entry": entry, "candles": candles, "current": current,
+        "candles": candles, "current": current,
         "tl": tl, "level": best["level"], "lines_gap": best["lines_gap"], "now_gap": best["now_gap"],
     }
+
+
+def find_confluence(entry: dict) -> dict | None:
+    candles = fetch_candles_for(entry)
+    hit = find_confluence_in_candles(candles)
+    if hit is None:
+        return None
+    hit["entry"] = entry
+    return hit
 
 
 def build_reason(hit: dict) -> str:

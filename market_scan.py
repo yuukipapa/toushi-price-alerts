@@ -9,6 +9,10 @@
 「反応回数が多い線ほど効く」というスクショ由来の考え方をそのままスコアにしているだけで、
 AIによる勝率判定ではない。あくまで学習メモの考え方に沿った機械的な絞り込み。
 
+これとは別に、confluence_scan.py(主要指数・仮想通貨11銘柄専用)と同じ「トレンドラインと水平線が
+両方交わっている」判定も、この227銘柄すべてに対して行う。水平線・トレンドラインを別々にチェックする
+上記の緩い条件より強いシグナルなので、該当銘柄はメール・履歴の先頭に別枠で表示する。
+
 必要な環境変数: ALERT_KEY, GMAIL_USER, GMAIL_APP_PASSWORD
 """
 import os
@@ -17,6 +21,8 @@ from urllib.parse import quote
 
 import requests
 
+from confluence_scan import build_reason as build_confluence_reason
+from confluence_scan import find_confluence_in_candles
 from main import (
     DB_URL, body_wick_note, describe_level_context, describe_trendline_context, detect_levels,
     detect_trendlines, fetch_stock_candles, jst_today_str, push_scan_history,
@@ -48,11 +54,15 @@ def build_universe(doc: dict) -> list:
     return list(universe.items())
 
 
-def find_near_support(ysym: str, label: str) -> list:
+def find_near_support(ysym: str, label: str) -> tuple[list, dict | None]:
     candles = fetch_stock_candles(ysym)
     if len(candles) < 30:
-        return []
+        return [], None
     current = candles[-1]["c"]
+
+    confluence = find_confluence_in_candles(candles, current)
+    if confluence:
+        confluence["entry"] = {"assetType": "stock", "ysym": ysym, "label": label}
 
     hits = []
     for lv in detect_levels(candles):
@@ -82,7 +92,7 @@ def find_near_support(ysym: str, label: str) -> list:
                 "price": line_now, "touches": tl["touches"], "kind": "sup",
                 "dist_pct": dist_pct, "candles": candles, "i1": tl["i1"], "p1": tl["p1"],
             })
-    return hits
+    return hits, confluence
 
 
 def build_reason(hit: dict) -> str:
@@ -109,34 +119,70 @@ def main() -> None:
     print(f"scanning {len(universe)} symbols")
 
     all_hits = []
+    confluence_hits = []
     for i, (ysym, label) in enumerate(universe):
         try:
-            hits = find_near_support(ysym, label)
+            hits, confluence = find_near_support(ysym, label)
         except Exception as e:
             print(f"[scan] retry after failure for {label} ({ysym}): {e}")
             time.sleep(3)
             try:
-                hits = find_near_support(ysym, label)
+                hits, confluence = find_near_support(ysym, label)
             except Exception as e2:
                 print(f"[scan] failed for {label} ({ysym}): {e2}")
-                hits = []
+                hits, confluence = [], None
         all_hits.extend(hits)
+        if confluence:
+            confluence_hits.append(confluence)
+            print(f"[confluence] {label}")
         if (i + 1) % 25 == 0:
             print(f"[scan] progress {i + 1}/{len(universe)}")
         time.sleep(REQUEST_DELAY_SEC)
 
+    confluence_hits.sort(key=lambda h: h["lines_gap"] + h["now_gap"])
+    # トレンドライン×水平線の交点として別枠で出す銘柄は、下の「支持線に接近」リストからは除外する
+    # (同じ銘柄が2回、別々の見出しで並ぶのを防ぐ)
+    confluence_ysyms = {h["entry"]["ysym"] for h in confluence_hits}
+    all_hits = [h for h in all_hits if h["ysym"] not in confluence_ysyms]
+
     all_hits.sort(key=lambda h: (-h["touches"], h["dist_pct"]))
     top = all_hits[:TOP_N]
-    print(f"found {len(all_hits)} candidates, sending top {len(top)}")
+    print(f"found {len(confluence_hits)} confluence hits, {len(all_hits)} support candidates, sending {len(confluence_hits)} confluence + top {len(top)}")
 
     items = []
-    if not top:
+    if not confluence_hits and not top:
         print("no candidates today, skipping email")
     else:
-        intro_lines = [
-            "今日の週足スキャンで、支持線に接近している銘柄です(反応回数が多い順)。",
-            "※ 学習メモの考え方に沿った機械的な抽出であり、投資助言ではありません。",
-        ]
+        intro_lines = ["今日の週足スキャン結果です。"]
+        if confluence_hits:
+            intro_lines.append("🎯 トレンドラインと水平線が交わる付近まで下げてきている銘柄(最有力セットアップ)を先頭に、")
+        intro_lines.append("反応回数が多い順の支持線接近銘柄を続けています。")
+        intro_lines.append("※ 学習メモの考え方に沿った機械的な抽出であり、投資助言ではありません。")
+
+        for h in confluence_hits:
+            entry = h["entry"]
+            tl = h["tl"]
+            link = chart_link(entry["ysym"], entry["label"])
+            aline = [[h["candles"][tl["i1"]]["t"], tl["p1"]], [h["candles"][-1]["t"], tl["trend_val"]]]
+            try:
+                png = render_chart_png(
+                    h["candles"], entry["ysym"],
+                    hline=h["level"]["price"], aline=(tuple(aline[0]), tuple(aline[1])),
+                )
+            except Exception as e:
+                print(f"[confluence] chart render failed for {entry['label']}: {e}")
+                png = None
+            items.append({
+                "header": f"🎯 {entry['label']} ({entry['ysym'].replace('.T', '')}) — トレンドライン×水平線の交点",
+                "text": build_confluence_reason(h),
+                "chart_link": link,
+                "png": png,
+                "asset_type": "stock",
+                "ysym": entry["ysym"],
+                "hline": h["level"]["price"],
+                "aline": aline,
+            })
+
         for h in top:
             link = chart_link(h["ysym"], h["label"])
             aline = None
@@ -161,7 +207,13 @@ def main() -> None:
                 "aline": aline,
             })
 
-        subject = f"📊 今日の支持線接近スキャン: {top[0]['label']}など{len(top)}件"
+        subject_bits = []
+        if confluence_hits:
+            subject_bits.append(f"🎯交点{len(confluence_hits)}件")
+        if top:
+            subject_bits.append(f"支持線接近{len(top)}件")
+        lead = confluence_hits[0]["entry"]["label"] if confluence_hits else top[0]["label"]
+        subject = f"📊 今日の週足スキャン({'+'.join(subject_bits)}): {lead}など"
         if to_addr:
             try:
                 send_digest_email(gmail_user, gmail_pass, to_addr, subject, intro_lines, items)
