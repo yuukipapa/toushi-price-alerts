@@ -213,7 +213,7 @@ def main() -> None:
             items.append({
                 "header": f"■ {entry['label']}",
                 "text": build_reason(h),
-                "chart_link": chart_link(entry),
+                "chart_link": chart_link(entry, hline=h["level"]["price"], aline=(tuple(aline[0]), tuple(aline[1]))),
                 "png": png,
                 "asset_type": entry.get("assetType"),
                 "ysym": entry.get("ysym"),

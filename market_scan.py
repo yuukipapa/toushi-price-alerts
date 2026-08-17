@@ -39,10 +39,20 @@ RSI_PERIOD = 14        # 週足RSI
 RSI_OVERSOLD = 30      # これを下回ったら「売られすぎ」として通知
 
 
-def chart_link(ysym: str, label: str) -> str:
-    """その銘柄の最新チャートを週足・自動線引き済みで開くリンク。
-    メール送信時点でなく、クリックした時点の最新データを表示する(過去メールから開いても最新状態を確認できる)。"""
-    return f"{CHART_TOOL_URL}/?ysym={quote(ysym)}&label={quote(label)}&tf=1w"
+def chart_link(ysym: str, label: str, hline: float = None, aline: list = None) -> str:
+    """その銘柄の最新チャートを開くリンク。メール送信時点でなく、クリックした時点の
+    最新データを表示する(過去メールから開いても最新状態を確認できる)。
+
+    hline/aline(メールの通知に実際に使った線の値)を渡すと、Web版はその線をそのまま再現する。
+    渡さない場合、Web版は自身の自動検出(drawLines())で線を引き直すが、これはこのファイルの
+    交点判定・detect_levels/detect_trendlinesとは別のアルゴリズムなので違う線になりうる。"""
+    url = f"{CHART_TOOL_URL}/?ysym={quote(ysym)}&label={quote(label)}&tf=1w"
+    if hline is not None:
+        url += f"&hline={hline}"
+    if aline is not None:
+        (t1, p1), (t2, p2) = aline
+        url += f"&aline={t1},{p1},{t2},{p2}"
+    return url
 
 
 def build_universe(doc: dict) -> list:
@@ -189,8 +199,8 @@ def main() -> None:
         for h in confluence_hits:
             entry = h["entry"]
             tl = h["tl"]
-            link = chart_link(entry["ysym"], entry["label"])
             aline = [[h["candles"][tl["i1"]]["t"], tl["p1"]], [h["candles"][-1]["t"], tl["trend_val"]]]
+            link = chart_link(entry["ysym"], entry["label"], hline=h["level"]["price"], aline=aline)
             try:
                 png = render_chart_png(
                     h["candles"], entry["ysym"],
@@ -229,10 +239,14 @@ def main() -> None:
             })
 
         for h in top:
-            link = chart_link(h["ysym"], h["label"])
             aline = None
             if h["line_type"] == "trend":
                 aline = [[h["candles"][h["i1"]]["t"], h["p1"]], [h["candles"][-1]["t"], h["price"]]]
+            link = chart_link(
+                h["ysym"], h["label"],
+                hline=h["price"] if h["line_type"] != "trend" else None,
+                aline=aline,
+            )
             try:
                 if aline:
                     png = render_chart_png(h["candles"], h["ysym"], aline=(tuple(aline[0]), tuple(aline[1])))

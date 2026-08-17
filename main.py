@@ -282,9 +282,14 @@ def asset_symbol(entry: dict) -> str:
     return entry.get("ysym") or entry.get("sym") or entry.get("isin") or entry.get("assetKey") or "?"
 
 
-def chart_link(entry: dict, tf: str = "1w") -> str:
-    """メール内のリンクから、その銘柄の最新チャートを自動線引き済みで直接開くためのURL。
-    entry は stock(ysym) / crypto(sym) / fund(isin+assoc) のいずれかの形式(alerts/watchlistと同じ)。"""
+def chart_link(entry: dict, tf: str = "1w", hline: float = None, aline: tuple = None) -> str:
+    """メール内のリンクから、その銘柄の最新チャートを直接開くためのURL。
+    entry は stock(ysym) / crypto(sym) / fund(isin+assoc) のいずれかの形式(alerts/watchlistと同じ)。
+
+    hline/aline(メールの通知に実際に使った水平線・トレンドラインの値)を渡すと、Web版はその線を
+    そのまま再現して開く。渡さない場合、Web版は自身の自動検出(drawLines())で線を引き直すが、
+    これはconfluence_scan.py/market_scan.py側の交点判定(直近安値の凸包など)とは別のアルゴリズムなので
+    違う線になる。メールの画像と同じ線を見せたい呼び出し元は必ず指定すること。"""
     label = entry.get("label") or asset_symbol(entry)
     params = {"label": label, "tf": tf}
     if entry.get("ysym"):
@@ -294,6 +299,11 @@ def chart_link(entry: dict, tf: str = "1w") -> str:
     elif entry.get("isin"):
         params["isin"] = entry["isin"]
         params["assoc"] = entry.get("assoc") or ""
+    if hline is not None:
+        params["hline"] = hline
+    if aline is not None:
+        (t1, p1), (t2, p2) = aline
+        params["aline"] = f"{t1},{p1},{t2},{p2}"
     query = "&".join(f"{k}={quote(str(v))}" for k, v in params.items())
     return f"{CHART_TOOL_URL}/?{query}"
 
