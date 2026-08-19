@@ -1,10 +1,8 @@
 """
 価格アラート監視(GitHub Actionsから定期実行するスクリプト)
 
-2つの通知源をチェックする:
-1. アラート(chart_check.html で🔔設定した水平線) — 価格が線を通過したら通知
-2. ウォッチリスト(👁登録した銘柄) — 週足で自動的に線を引き直し、価格がその線の±1%に
-   近づいたら通知(手動で線を引かなくていい版)
+chart_check.html で🔔設定した線(水平線・斜め線、自動検出線から昇格したものも含む)を
+チェックし、価格が線を通過したら通知する。
 
 データは Firebase Realtime DB の /toushi_alerts/<ALERT_KEY> に
 chart_check.html 側の ALERT_SYNC と同じ形式で保存されている。
@@ -33,8 +31,6 @@ from curl_cffi import requests as cffi_requests
 
 DB_URL = "https://routine-sync-7029e-default-rtdb.asia-southeast1.firebasedatabase.app"
 CHART_TOOL_URL = "https://wyujiro-toushi-chart.web.app"
-NEAR_PCT = 0.01       # ウォッチリスト: 線の±1%に近づいたら通知
-COOLDOWN_HOURS = 24    # 同じ線について再通知するまでの間隔
 JST = timezone(timedelta(hours=9))
 
 
@@ -95,7 +91,7 @@ def fetch_crypto_price(sym: str) -> float:
     return float(r.json()["data"]["amount"])
 
 
-# ── 過去足の取得(ウォッチリストの自動線引き用・週足) ──
+# ── 過去足の取得(斜め線アラートのチャート画像描画用・週足) ──
 
 def fetch_stock_candles(ysym: str) -> list:
     # 全期間(上場来)だと株式分割前の古い安値がノイズとして支持線に混ざるため、直近8年に絞る
@@ -299,7 +295,7 @@ def asset_symbol(entry: dict) -> str:
 
 def chart_link(entry: dict, tf: str = "1w", hline: float = None, aline: tuple = None) -> str:
     """メール内のリンクから、その銘柄の最新チャートを直接開くためのURL。
-    entry は stock(ysym) / crypto(sym) / fund(isin+assoc) のいずれかの形式(alerts/watchlistと同じ)。
+    entry は stock(ysym) / crypto(sym) / fund(isin+assoc) のいずれかの形式(alertsと同じ)。
 
     hline/aline(メールの通知に実際に使った水平線・トレンドラインの値)を渡すと、Web版はその線を
     そのまま再現して開く。渡さない場合、Web版は自身の自動検出(drawLines())で線を引き直すが、
@@ -727,162 +723,6 @@ def trend_price_now(a: dict) -> float:
     return math.exp(math.log(p1) + slope * (now_ms - t1))
 
 
-# ── ②ウォッチリスト(自動で線を引いて監視) ──
-
-def level_key(price: float) -> str:
-    # Firebase Realtime DBのキーは "." を含められない(含めると書き込みが400で拒否される)。
-    # notifiedLevelsのキーとして使うため、小数点を含みうる"g"表記から"."を除去する。
-    return f"{price:.3g}".replace(".", "p")
-
-
-def check_watchlist(doc: dict, gmail_user: str, gmail_pass: str) -> bool:
-    watchlist = doc.get("watchlist") or []
-    if not watchlist:
-        return False
-
-    to_addr = doc.get("notifyEmail")
-    now = datetime.now(timezone.utc)
-    changed = False
-    market_open = jp_market_open(now)
-
-    for w in watchlist:
-        if is_jp_stock(w) and not market_open:
-            continue
-
-        try:
-            if w.get("assetType") == "stock":
-                candles = fetch_stock_candles(w["ysym"])
-                current = fetch_stock_price(w["ysym"])
-            elif w.get("assetType") == "fund":
-                candles = fetch_fund_candles(w["isin"], w["assoc"])
-                current = fetch_fund_price(w["isin"], w["assoc"])
-            elif w.get("assetType") == "crypto":
-                candles = fetch_crypto_candles(w["sym"])
-                current = fetch_crypto_price(w["sym"])
-            else:
-                continue
-        except Exception as e:
-            print(f"[watchlist] fetch failed for {w.get('label')}: {e}")
-            continue
-
-        levels = detect_levels(candles)
-        if not levels:
-            print(f"[watchlist] {w['label']}: not enough candles to detect levels ({len(candles)})")
-            continue
-
-        nearest = min(levels, key=lambda lv: abs(current - lv["price"]) / lv["price"] if lv["price"] > 0 else float("inf"))
-        nearest_dist = abs(current - nearest["price"]) / nearest["price"] * 100 if nearest["price"] > 0 else float("inf")
-        print(f"[watchlist] {w['label']}: current={current} nearest_level={nearest['price']:.4g} ({nearest_dist:.1f}% away)")
-
-        notified = w.get("notifiedLevels") or {}
-        for lv in levels:
-            if lv["price"] <= 0:
-                continue
-            dist_pct = abs(current - lv["price"]) / lv["price"]
-            if dist_pct > NEAR_PCT:
-                continue
-
-            key = "h:" + level_key(lv["price"])
-            last_notified = notified.get(key)
-            if last_notified:
-                try:
-                    elapsed_h = (now - datetime.fromisoformat(last_notified)).total_seconds() / 3600
-                    if elapsed_h < COOLDOWN_HOURS:
-                        continue
-                except ValueError:
-                    pass
-
-            if to_addr:
-                try:
-                    kind_label = {"ath": "上場来高値(ATH)", "lv": f"{lv['touches']}回反応の水平線"}.get(lv["kind"], "水平線")
-                    subject = f"👁 ウォッチ通知: {w['label']} が {kind_label}({lv['price']:.4g})に接近"
-                    reason = describe_level_context(current, lv["price"], lv["touches"], lv["kind"])
-                    bw = body_wick_note(candles, lv["price"])
-                    if bw:
-                        reason += "\n\n" + bw
-                    body = (
-                        f"{w['label']} の価格が、自動検出した{kind_label} {lv['price']:.4g} の"
-                        f"±{NEAR_PCT * 100:.0f}%以内に近づきました。\n\n"
-                        f"現在価格: {current}\n\n"
-                        f"【この通知の根拠】\n{reason}\n\n"
-                        f"最新チャートを見る: {chart_link(w)}\n\n"
-                        "※ これは投資助言ではありません。売買の最終判断は自分で行ってください。"
-                    )
-                    try:
-                        png = render_chart_png(candles, asset_symbol(w), hline=lv["price"])
-                        images = [{"cid": "chart1", "data": png, "caption": ""}]
-                    except Exception as e:
-                        print(f"[watchlist] chart render failed: {e}")
-                        images = None
-                    send_email(gmail_user, gmail_pass, to_addr, subject, body, images=images)
-                    print(f"[watchlist] sent: {w['label']} @ {lv['price']:.4g} (current {current})")
-                except Exception as e:
-                    print(f"[watchlist] email send failed: {e}")
-
-            notified[key] = now.isoformat()
-            changed = True
-
-        # 斜めの抵抗線・支持線(トレンドライン)も同様にチェックする
-        trendlines = detect_trendlines(candles)
-        for tl in trendlines:
-            line_now = trendline_price_at(tl, len(candles) - 1)
-            if line_now <= 0:
-                continue
-            dist_pct = abs(current - line_now) / line_now
-            if dist_pct > NEAR_PCT:
-                continue
-
-            key = "t:" + tl["kind"] + ":" + level_key(line_now)
-            last_notified = notified.get(key)
-            if last_notified:
-                try:
-                    elapsed_h = (now - datetime.fromisoformat(last_notified)).total_seconds() / 3600
-                    if elapsed_h < COOLDOWN_HOURS:
-                        continue
-                except ValueError:
-                    pass
-
-            if to_addr:
-                try:
-                    kind_label = "斜めの支持線" if tl["kind"] == "sup" else "斜めの抵抗線"
-                    subject = f"👁 ウォッチ通知: {w['label']} が {kind_label}({line_now:.4g})に接近"
-                    reason = describe_trendline_context(current, line_now, tl["touches"], tl["kind"])
-                    bw = body_wick_note(candles, line_now)
-                    if bw:
-                        reason += "\n\n" + bw
-                    body = (
-                        f"{w['label']} の価格が、自動検出した{kind_label}(現在値換算 {line_now:.4g})の"
-                        f"±{NEAR_PCT * 100:.0f}%以内に近づきました。\n\n"
-                        f"現在価格: {current}\n\n"
-                        f"【この通知の根拠】\n{reason}\n\n"
-                        f"最新チャートを見る: {chart_link(w)}\n\n"
-                        "※ これは投資助言ではありません。売買の最終判断は自分で行ってください。"
-                    )
-                    try:
-                        aline = ((candles[tl["i1"]]["t"], tl["p1"]), (candles[-1]["t"], line_now))
-                        png = render_chart_png(candles, asset_symbol(w), aline=aline)
-                        images = [{"cid": "chart1", "data": png, "caption": ""}]
-                    except Exception as e:
-                        print(f"[watchlist] chart render failed: {e}")
-                        images = None
-                    send_email(gmail_user, gmail_pass, to_addr, subject, body, images=images)
-                    print(f"[watchlist] sent: {w['label']} trendline({tl['kind']}) @ {line_now:.4g} (current {current})")
-                except Exception as e:
-                    print(f"[watchlist] email send failed: {e}")
-
-            notified[key] = now.isoformat()
-            changed = True
-
-        # 古い通知履歴が無限に増えないよう、直近30件だけ残す
-        if len(notified) > 30:
-            for k in sorted(notified, key=lambda k: notified[k])[: len(notified) - 30]:
-                del notified[k]
-            changed = True
-        w["notifiedLevels"] = notified
-
-    return changed
-
-
 def main() -> None:
     alert_key = os.environ["ALERT_KEY"]
     gmail_user = os.environ["GMAIL_USER"]
@@ -894,21 +734,16 @@ def main() -> None:
     doc = res.json() or {}
 
     changed_a = check_alerts(doc, gmail_user, gmail_pass)
-    changed_w = check_watchlist(doc, gmail_user, gmail_pass)
 
-    if not (changed_a or changed_w):
+    if not changed_a:
         print("no changes")
         return
 
     # PUTだとこの直前のGET以降に他プロセス(market_scan/confluence_scan)がscanHistoryへ書き込んでいた場合に
     # 上書きで消してしまう。PATCHならdocに含まれるフィールドだけを更新し、他は触らないため安全。
-    # ここで実際に変更したのはalerts/watchlistのみなので、docを丸ごと送り返さずこの2つだけにする
+    # ここで実際に変更したのはalertsのみなので、docを丸ごと送り返さずそれだけにする
     # (scanHistoryのような無関係な大きいフィールドまで書き戻すと、書き込み失敗の原因になりうるため)。
-    patch_body = {}
-    if changed_a:
-        patch_body["alerts"] = doc.get("alerts")
-    if changed_w:
-        patch_body["watchlist"] = doc.get("watchlist")
+    patch_body = {"alerts": doc.get("alerts")}
     res2 = requests.patch(doc_url, json=patch_body, timeout=10)
     res2.raise_for_status()  # 失敗を握りつぶすと次回以降も同じ通知を送り続けてしまうため必ず検知する
     print("saved changes")

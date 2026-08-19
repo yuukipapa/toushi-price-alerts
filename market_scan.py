@@ -60,9 +60,6 @@ def build_universe(doc: dict) -> list:
     for a in (doc.get("alerts") or []):
         if a.get("assetType") == "stock" and a.get("ysym"):
             universe.setdefault(a["ysym"], a.get("label") or a["ysym"])
-    for w in (doc.get("watchlist") or []):
-        if w.get("assetType") == "stock" and w.get("ysym"):
-            universe.setdefault(w["ysym"], w.get("label") or w["ysym"])
     return list(universe.items())
 
 
