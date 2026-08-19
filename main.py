@@ -730,7 +730,9 @@ def trend_price_now(a: dict) -> float:
 # ── ②ウォッチリスト(自動で線を引いて監視) ──
 
 def level_key(price: float) -> str:
-    return f"{price:.3g}"
+    # Firebase Realtime DBのキーは "." を含められない(含めると書き込みが400で拒否される)。
+    # notifiedLevelsのキーとして使うため、小数点を含みうる"g"表記から"."を除去する。
+    return f"{price:.3g}".replace(".", "p")
 
 
 def check_watchlist(doc: dict, gmail_user: str, gmail_pass: str) -> bool:
