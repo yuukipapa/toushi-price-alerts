@@ -35,6 +35,21 @@ DB_URL = "https://routine-sync-7029e-default-rtdb.asia-southeast1.firebasedataba
 CHART_TOOL_URL = "https://wyujiro-toushi-chart.web.app"
 NEAR_PCT = 0.01       # ウォッチリスト: 線の±1%に近づいたら通知
 COOLDOWN_HOURS = 24    # 同じ線について再通知するまでの間隔
+JST = timezone(timedelta(hours=9))
+
+
+def is_jp_stock(entry: dict) -> bool:
+    return entry.get("assetType") == "stock" and str(entry.get("ysym") or "").endswith(".T")
+
+
+def jp_market_open(now_utc: datetime = None) -> bool:
+    # 日本株のみ対象。祝日カレンダーは見ておらず平日9:00-15:30(昼休みも含めた大まかな判定)。
+    # 仮想通貨・投信・日本株以外はここでは絞らない(呼び出し側でis_jp_stockの銘柄にのみ適用する)。
+    now = (now_utc or datetime.now(timezone.utc)).astimezone(JST)
+    if now.weekday() >= 5:
+        return False
+    minutes = now.hour * 60 + now.minute
+    return 9 * 60 <= minutes <= 15 * 60 + 30
 
 
 # ── 価格取得(現在値) ──
@@ -603,8 +618,12 @@ def check_alerts(doc: dict, gmail_user: str, gmail_pass: str) -> bool:
     to_addr = doc.get("notifyEmail")
     price_cache: dict = {}
     changed = False
+    market_open = jp_market_open()
 
     for a in active:
+        if is_jp_stock(a) and not market_open:
+            continue
+
         cache_key = (
             a.get("assetType"),
             a.get("ysym") or a.get("sym") or f"{a.get('isin')}|{a.get('assoc')}",
@@ -722,8 +741,12 @@ def check_watchlist(doc: dict, gmail_user: str, gmail_pass: str) -> bool:
     to_addr = doc.get("notifyEmail")
     now = datetime.now(timezone.utc)
     changed = False
+    market_open = jp_market_open(now)
 
     for w in watchlist:
+        if is_jp_stock(w) and not market_open:
+            continue
+
         try:
             if w.get("assetType") == "stock":
                 candles = fetch_stock_candles(w["ysym"])
@@ -877,7 +900,15 @@ def main() -> None:
 
     # PUTだとこの直前のGET以降に他プロセス(market_scan/confluence_scan)がscanHistoryへ書き込んでいた場合に
     # 上書きで消してしまう。PATCHならdocに含まれるフィールドだけを更新し、他は触らないため安全。
-    requests.patch(doc_url, json=doc, timeout=10)
+    # ここで実際に変更したのはalerts/watchlistのみなので、docを丸ごと送り返さずこの2つだけにする
+    # (scanHistoryのような無関係な大きいフィールドまで書き戻すと、書き込み失敗の原因になりうるため)。
+    patch_body = {}
+    if changed_a:
+        patch_body["alerts"] = doc.get("alerts")
+    if changed_w:
+        patch_body["watchlist"] = doc.get("watchlist")
+    res2 = requests.patch(doc_url, json=patch_body, timeout=10)
+    res2.raise_for_status()  # 失敗を握りつぶすと次回以降も同じ通知を送り続けてしまうため必ず検知する
     print("saved changes")
 
 
