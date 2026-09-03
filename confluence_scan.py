@@ -26,7 +26,7 @@ import os
 import requests
 
 from main import (
-    DB_URL, asset_symbol, chart_link, fetch_candles_for, find_pivots,
+    DB_URL, asset_symbol, chart_link, fetch_candles_for, find_pivots, fmt_price,
     jst_today_str, push_scan_history, render_chart_png, send_digest_email,
 )
 
@@ -155,9 +155,9 @@ def build_reason(hit: dict) -> str:
     lv, tl = hit["level"], hit["tl"]
     return (
         f"トレンドライン(週足の安値を結んだ直近の上昇支持線、安値{tl['touches']}点を通過、"
-        f"現在値換算 約{tl['trend_val']:.4g})と、水平線({lv['touches']}回反応、約{lv['price']:.4g})が"
+        f"現在値換算 約{fmt_price(tl['trend_val'])})と、水平線({lv['touches']}回反応、約{fmt_price(lv['price'])})が"
         f"現在値の{hit['lines_gap']*100:.1f}%以内まで接近しています。"
-        f"現在価格({hit['current']:.4g})はその交点の{hit['now_gap']*100:.1f}%圏内で、"
+        f"現在価格({fmt_price(hit['current'])})はその交点の{hit['now_gap']*100:.1f}%圏内で、"
         "直近は上からこのゾーンに向けて下げてきています。"
         "教材の考え方でいう「トレンドラインと水平線の交点(カチカチ)」に近い状態で、反発しやすいと考えられます。"
         "ただし実体でこのゾーンを割り込んだ場合はシナリオ崩れとみなし、早めに見切るのが基本です。"

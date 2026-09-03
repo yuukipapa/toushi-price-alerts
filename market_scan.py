@@ -25,7 +25,7 @@ from confluence_scan import build_reason as build_confluence_reason
 from confluence_scan import find_confluence_in_candles
 from main import (
     DB_URL, body_wick_note, describe_level_context, describe_trendline_context, detect_levels,
-    detect_trendlines, fetch_stock_candles, jst_today_str, push_scan_history,
+    detect_trendlines, fetch_stock_candles, fmt_price, jst_today_str, push_scan_history,
     render_chart_png, rsi, send_digest_email, trendline_price_at,
 )
 from nikkei225 import NIKKEI225
@@ -121,7 +121,7 @@ def build_reason(hit: dict) -> str:
 def build_rsi_reason(hit: dict) -> str:
     return (
         f"週足RSI({RSI_PERIOD})が{hit['rsi']:.1f}まで低下し、{RSI_OVERSOLD}を割り込んでいます"
-        f"(現在値 約{hit['current']:.4g})。売られすぎの水準ですが、下落が続いたまま"
+        f"(現在値 約{fmt_price(hit['current'])})。売られすぎの水準ですが、下落が続いたまま"
         "RSIが低いまま張り付くこともあるため、これ単体を買いシグナルとはせず、"
         "支持線での反発など他の根拠と合わせて判断するのが基本です。"
     )

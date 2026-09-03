@@ -24,6 +24,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from urllib.parse import quote
 
+import matplotlib.pyplot as plt
 import mplfinance as mpf
 import pandas as pd
 import requests
@@ -32,6 +33,46 @@ from curl_cffi import requests as cffi_requests
 DB_URL = "https://routine-sync-7029e-default-rtdb.asia-southeast1.firebasedatabase.app"
 CHART_TOOL_URL = "https://wyujiro-toushi-chart.web.app"
 JST = timezone(timedelta(hours=9))
+
+# 現在価格ラインの色。chart_check.html 側の現在価格ラインと同じ色にして、
+# メールの画像とWeb版チャートで同じ線が同じ意味に見えるようにしている
+CURRENT_LINE_COLOR = "#ff7a00"
+
+
+def fmt_price(p) -> str:
+    """価格を人が読める文字列にする。
+
+    以前は `{:.4g}` を使っていたため、5桁以上の価格が `2.665e+04` という指数表記に化けて
+    メールでもWeb版のスキャン履歴でも読めなかった。日本株・米国株の4〜6桁から
+    仮想通貨の低単価(0.00001234)まで同じ関数で扱えるよう、桁で小数点以下を切り替える。
+    """
+    if p is None:
+        return "-"
+    try:
+        p = float(p)
+    except (TypeError, ValueError):
+        return str(p)
+    a = abs(p)
+    if a >= 1000:
+        return f"{p:,.0f}"
+    if a >= 100:
+        return f"{p:,.1f}"
+    if a >= 1:
+        return f"{p:,.2f}"
+    if a >= 0.01:
+        return f"{p:.4f}"
+    if a > 0:
+        return f"{p:.8f}".rstrip("0")
+    return "0"
+
+
+def fmt_candle_time(t_ms) -> str:
+    """ローソク足のタイムスタンプを日本時間の文字列にする。
+    週足は日付だけ、時刻を持つ足は分まで出す(ASCIIのみ。理由は asset_symbol() のコメント参照)。"""
+    dt = datetime.fromtimestamp(t_ms / 1000, JST)
+    if dt.hour or dt.minute:
+        return f"{dt:%Y-%m-%d %H:%M} JST"
+    return f"{dt:%Y-%m-%d} JST"
 
 
 def is_jp_stock(entry: dict) -> bool:
@@ -322,8 +363,11 @@ def chart_link(entry: dict, tf: str = "1w", hline: float = None, aline: tuple = 
 
 def render_chart_png(
     candles: list, title: str, hline: float = None, aline: tuple = None,
-    n: int = 60,
+    n: int = 60, current: float = None,
 ) -> bytes:
+    """current を渡さない場合は最終足の終値を現在価格として扱い、オレンジの水平線+価格ラベルを引く。
+    タイトルには現在価格と最終足の日本時間を出す(GitHub Actionsのランナーには日本語フォントが
+    無いため、タイトルはASCIIのみで組み立てる。asset_symbol() のコメント参照)。"""
     rows = candles[-n:]
     df = pd.DataFrame(rows)
     df["t"] = pd.to_datetime(df["t"], unit="ms")
@@ -347,12 +391,29 @@ def render_chart_png(
         pts = [(pd.to_datetime(t1s, unit="ms"), price_at(t1s)), (pd.to_datetime(t2s, unit="ms"), price_at(t2s))]
         kwargs["alines"] = dict(alines=[pts], colors=["#2962ff"], linewidths=[1.2])
 
-    buf = io.BytesIO()
-    mpf.plot(
-        df, type="candle", style="yahoo", title=title, volume=False,
-        figsize=(7, 4), savefig=dict(fname=buf, dpi=110, bbox_inches="tight"),
-        **kwargs,
+    cur = float(current) if current is not None else float(rows[-1]["c"])
+    full_title = f"{title}  Last {fmt_price(cur)} ({fmt_candle_time(rows[-1]['t'])})"
+
+    # 現在価格ラインはmplfinanceのhlinesでは引けない(hlinesのlinestyleは1本目と共通の
+    # スカラー指定しか受け付けず、既存の青い破線と線種を分けられない)ため、
+    # returnfig=True で軸を取り出して自分で引く。右端の価格ラベルも同じ理由でここで描く。
+    fig, axes = mpf.plot(
+        df, type="candle", style="yahoo", title=full_title, volume=False,
+        figsize=(7, 4), returnfig=True, **kwargs,
     )
+    try:
+        ax = axes[0]
+        ax.axhline(cur, color=CURRENT_LINE_COLOR, linewidth=1.6, zorder=5)
+        ax.annotate(
+            fmt_price(cur), xy=(1.0, cur), xycoords=("axes fraction", "data"),
+            xytext=(4, 0), textcoords="offset points", ha="left", va="center",
+            fontsize=8, color="#ffffff", zorder=6,
+            bbox=dict(boxstyle="square,pad=0.28", fc=CURRENT_LINE_COLOR, ec="none"),
+        )
+        buf = io.BytesIO()
+        fig.savefig(buf, dpi=110, bbox_inches="tight")
+    finally:
+        plt.close(fig)
     buf.seek(0)
     return buf.getvalue()
 
@@ -574,14 +635,14 @@ def describe_level_context(current: float, level_price: float, touches: int, kin
     dist_pct = abs(current - level_price) / level_price * 100 if level_price else 0
     if is_support:
         return (
-            f"現在価格は、週足で{touches}回反応している支持線({level_price:.4g})の{dist_pct:.1f}%上にいます。"
+            f"現在価格は、週足で{touches}回反応している支持線({fmt_price(level_price)})の{dist_pct:.1f}%上にいます。"
             "反応回数が多い線ほど効きやすい、というのが教材の考え方です。ここで下げ止まりを実体で確認できれば、"
             "「サポートタッチでの買い場」の候補になります(ブレイク後に追いかけるより損切りが浅く、利益が大きくなりやすいとされる位置)。"
             "逆に実体でこの線を割ってしまった場合は、シナリオが崩れたとみなして早めに見切るのが基本です。"
         )
     else:
         return (
-            f"現在価格は、週足で{touches}回反応している抵抗線({level_price:.4g})の{dist_pct:.1f}%下にいます。"
+            f"現在価格は、週足で{touches}回反応している抵抗線({fmt_price(level_price)})の{dist_pct:.1f}%下にいます。"
             "教材ではこの位置は「抵抗線に当たって落ちることが想定されるタイミング」であり、新規で買うよりも利確を検討する場面とされています。"
             "実体でこの線を超えて維持できれば「レジサポ転換」の可能性もあるので、超えた後の値動きも確認してください。"
         )
@@ -591,13 +652,13 @@ def describe_trendline_context(current: float, line_price: float, touches: int, 
     dist_pct = abs(current - line_price) / line_price * 100 if line_price else 0
     if kind == "sup":
         return (
-            f"現在価格は、直近の安値同士を結んだ斜めの支持線(現在値換算 {line_price:.4g})の{dist_pct:.1f}%上にいます"
+            f"現在価格は、直近の安値同士を結んだ斜めの支持線(現在値換算 {fmt_price(line_price)})の{dist_pct:.1f}%上にいます"
             f"(過去に{touches}回以上タッチしている線)。教材の考え方では、水平線だけでなく斜め線も"
             "反発・反落の目印になります。ここで実体を保ったまま反発できるかが焦点で、割れた場合はシナリオ崩れとみなして早めに見切るのが基本です。"
         )
     else:
         return (
-            f"現在価格は、直近の高値同士を結んだ斜めの抵抗線(現在値換算 {line_price:.4g})の{dist_pct:.1f}%下にいます"
+            f"現在価格は、直近の高値同士を結んだ斜めの抵抗線(現在値換算 {fmt_price(line_price)})の{dist_pct:.1f}%下にいます"
             f"(過去に{touches}回以上タッチしている線)。教材では、水平線と斜め線が重なる交点は特に強い抵抗とされ、"
             "利確ポイントの候補になります。実体でこの斜め線を上に抜けて維持できれば、トレンド転換(レジサポ転換)の可能性も出てきます。"
         )
@@ -648,7 +709,7 @@ def check_alerts(doc: dict, gmail_user: str, gmail_pass: str) -> bool:
         except Exception as e:
             print(f"[alerts] trend extrapolation failed for {a.get('label')}: {e}")
             continue
-        line_desc = f"斜め線(延長線上の現在値 {line_price:.4g})" if is_trend else f"{line_price}"
+        line_desc = f"斜め線(延長線上の現在値 {fmt_price(line_price)})" if is_trend else fmt_price(line_price)
 
         side = "above" if price >= line_price else "below"
         if a.get("lastSide") is None:
@@ -679,7 +740,7 @@ def check_alerts(doc: dict, gmail_user: str, gmail_pass: str) -> bool:
                             reason += "\n\n" + bw
                     body = (
                         f"{a['label']} の価格が、設定していたライン {line_desc} を通過しました。\n\n"
-                        f"現在価格: {price}\n\n"
+                        f"現在価格: {fmt_price(price)}\n\n"
                         f"【この通知の根拠】\n{reason}\n\n"
                         f"最新チャートを見る: {chart_link(a)}\n\n"
                         "※ これは投資助言ではありません。売買の最終判断は自分で行ってください。"
