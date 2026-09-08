@@ -731,15 +731,20 @@ def check_alerts(doc: dict, gmail_user: str, gmail_pass: str) -> bool:
                         print(f"[alerts] candle fetch for body/wick check failed: {e}")
                         alert_candles = None
 
-                    subject = f"🔔 価格アラート: {a['label']} が {line_desc} を通過"
                     direction = "up" if side == "above" else "down"
+                    if direction == "up":
+                        subject = f"🚀 価格アラート: {a['label']} が {line_desc} を突破!"
+                        cross_verb = "突破"
+                    else:
+                        subject = f"🔔 価格アラート: {a['label']} が {line_desc} を割り込み"
+                        cross_verb = "割り込み"
                     reason = describe_cross(direction, is_trend, a.get("note") or "")
                     if alert_candles:
                         bw = body_wick_note(alert_candles, line_price)
                         if bw:
                             reason += "\n\n" + bw
                     body = (
-                        f"{a['label']} の価格が、設定していたライン {line_desc} を通過しました。\n\n"
+                        f"{a['label']} の価格が、設定していたライン {line_desc} を{cross_verb}しました。\n\n"
                         f"現在価格: {fmt_price(price)}\n\n"
                         f"【この通知の根拠】\n{reason}\n\n"
                         f"最新チャートを見る: {chart_link(a)}\n\n"
