@@ -24,7 +24,7 @@ import requests
 from confluence_scan import build_reason as build_confluence_reason
 from confluence_scan import find_confluence_in_candles
 from main import (
-    DB_URL, body_wick_note, describe_level_context, describe_trendline_context, detect_levels,
+    DB_URL, body_position_label, body_wick_note, describe_level_context, describe_trendline_context, detect_levels,
     detect_trendlines, fetch_stock_candles, fmt_price, jst_today_str, push_scan_history,
     render_chart_png, rsi, send_digest_email, trendline_price_at,
 )
@@ -115,7 +115,8 @@ def build_reason(hit: dict) -> str:
     else:
         reason = describe_level_context(hit["current"], hit["price"], hit["touches"], hit["kind"])
     bw = body_wick_note(hit["candles"], hit["price"])
-    return reason + ("\n  " + bw if bw else "")
+    label = body_position_label(hit["candles"], hit["price"])
+    return (label + "\n  " if label else "") + reason + ("\n  " + bw if bw else "")
 
 
 def build_rsi_reason(hit: dict) -> str:

@@ -604,6 +604,27 @@ def body_wick_note(candles: list, line_price: float) -> str:
     )
 
 
+def body_position_label(candles: list, line_price: float) -> str:
+    # 支持線に対する最新の週足の位置を、バックテスト(backtest/engine.py の body 区分)と同じ4区分で表示する。
+    # 選別には使わず表示だけ。朝のスキャン時点では最新の週足は形成中なので、その旨も添える。
+    if not candles or line_price <= 0:
+        return ""
+    last = candles[-1]
+    o, l, c = last["o"], last["l"], last["c"]
+    if c < line_price:
+        mark = "⚠️ 実体で割っている(終値が線の下)"
+    elif o < line_price:
+        mark = "⚠️ 実体で割っている(始値が線の下、終値で線の上に戻した)"
+    elif l < line_price:
+        mark = "✅ ヒゲだけ(安値は線を割ったが、始値・終値は線の上)"
+    else:
+        mark = "線の上(今週はまだ線に触れていない)"
+    return (
+        f"【今週の足の形】{mark}"
+        " ※今週の足は形成中の場合あり。過去の検証(日経225)では、ヒゲだけの足は成績が良く、実体で割った足は悪い傾向でした。"
+    )
+
+
 def describe_cross(direction: str, is_trend: bool, note: str) -> str:
     line_type = "斜め線(トレンドライン)" if is_trend else "水平線"
     if direction == "up":  # 下から上に抜けた(ブレイクアウト/レジサポ転換の入口)

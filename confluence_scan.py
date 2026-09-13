@@ -26,7 +26,7 @@ import os
 import requests
 
 from main import (
-    DB_URL, asset_symbol, chart_link, fetch_candles_for, find_pivots, fmt_price,
+    DB_URL, asset_symbol, body_position_label, chart_link, fetch_candles_for, find_pivots, fmt_price,
     jst_today_str, push_scan_history, render_chart_png, send_digest_email,
 )
 
@@ -98,7 +98,9 @@ def active_support_trendline(candles: list) -> dict | None:
     (x1, y1), (x2, y2) = hull[-2], hull[-1]
     slope = (y2 - y1) / (x2 - x1)
     trend_val = y2 + slope * ((n - 1) - x2)
-    return {"i1": x1, "p1": y1, "i2": x2, "p2": y2, "trend_val": trend_val, "touches": len(hull)}
+    # 線は凸包の末尾2点だけで引いている(凸包は同一直線上の点を除くので、線上の安値は常に2点)。
+    # len(hull) は凸包全体の頂点数であって「この線が通る安値の数」ではないため、メールには出さない。
+    return {"i1": x1, "p1": y1, "i2": x2, "p2": y2, "trend_val": trend_val, "slope": slope}
 
 
 def find_confluence_in_candles(candles: list, current: float | None = None) -> dict | None:
@@ -153,8 +155,10 @@ def find_confluence(entry: dict) -> dict | None:
 
 def build_reason(hit: dict) -> str:
     lv, tl = hit["level"], hit["tl"]
-    return (
-        f"トレンドライン(週足の安値を結んだ直近の上昇支持線、安値{tl['touches']}点を通過、"
+    direction = "上向き" if tl["slope"] > 0 else "下向き" if tl["slope"] < 0 else "横ばい"
+    label = body_position_label(hit["candles"], lv["price"])
+    return (label + "\n  " if label else "") + (
+        f"トレンドライン(週足の直近の安値2点を結んだ{direction}の支持線、"
         f"現在値換算 約{fmt_price(tl['trend_val'])})と、水平線({lv['touches']}回反応、約{fmt_price(lv['price'])})が"
         f"現在値の{hit['lines_gap']*100:.1f}%以内まで接近しています。"
         f"現在価格({fmt_price(hit['current'])})はその交点の{hit['now_gap']*100:.1f}%圏内で、"
