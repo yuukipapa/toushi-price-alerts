@@ -152,6 +152,27 @@ def fetch_stock_candles(ysym: str) -> list:
         if None in (o, h, l, c):
             continue
         candles.append({"t": t * 1000, "o": o, "h": h, "l": l, "c": c})
+    return merge_trailing_same_period(candles, WEEKLY_MERGE_GAP_MS)
+
+
+WEEKLY_MERGE_GAP_MS = 6 * 86400 * 1000
+
+
+def merge_trailing_same_period(candles: list, period_ms: int) -> list:
+    # Yahooの週足/月足は、週(月)の途中や週末に「その期間の行」とは別に、同じ期間の最新取引時刻の行
+    # (日本株なら15:30)を末尾に追加で返すことがある。そのまま使うと同じ週が2本になり、
+    # ピボットが1本早く確定してトレンドライン・水平線・「6本前より下げたか」の判定がずれる
+    # (2026-09-14の調査で、配信とバックテストの食い違いの主因と判明。backtest/mismatch/調査結果.md)。
+    # 末尾2行の間隔が閾値未満なら同じ期間とみなし、1本にまとめる。閾値を7日ちょうどにすると、
+    # 米国株は夏時間の切り替え週に正規の週の間隔が6.96日になり、別々の週を誤ってまとめてしまうため6日にしている
+    # (追加行は日本株で週初から最大約4.7日後、米国株で約5.7日後)。
+    if len(candles) >= 2 and candles[-1]["t"] - candles[-2]["t"] < period_ms:
+        prev, last = candles[-2], candles[-1]
+        merged = {
+            "t": prev["t"], "o": prev["o"],
+            "h": max(prev["h"], last["h"]), "l": min(prev["l"], last["l"]), "c": last["c"],
+        }
+        return candles[:-2] + [merged]
     return candles
 
 
