@@ -134,9 +134,21 @@ def fetch_crypto_price(sym: str) -> float:
 
 # ── 過去足の取得(斜め線アラートのチャート画像描画用・週足) ──
 
+# 交点スキャンだけは検出に使う期間を8年に保つ(下の DETECTION_WINDOW_DAYS を参照)
+DETECTION_WINDOW_DAYS = 8 * 365
+# 線の検出に使う株価の開始日(バックテストで検証した範囲に合わせる)
+DETECTION_START_TS = int(datetime(2007, 1, 1, tzinfo=timezone.utc).timestamp())
+
+
 def fetch_stock_candles(ysym: str) -> list:
-    # 全期間(上場来)だと株式分割前の古い安値がノイズとして支持線に混ざるため、直近8年に絞る
-    period1 = int(datetime.now(timezone.utc).timestamp()) - 8 * 365 * 86400
+    # 以前は「分割前の古い安値がノイズになる」という理由で直近8年に絞っていたが、
+    # Yahooの株価は取得時点で分割調整済みで段差がないことを確認したため、この理由は成り立たない
+    # (2026-09-18検証: 400分割の銘柄でも分割日前後で価格が連続していた)。
+    # 期間を広げると、週足の支持線接近の期待値は train +1.038%→+1.162%、validation +0.777%→+1.302%に改善した
+    # (backtest/window_review/REPORT_WINDOW.md)。点灯数は約2割減る。
+    # 開始を2007-01-01にしているのは、その検証で使った株価データが2007年始まりだから。
+    # Yahooはさらに古い1999〜2005年まで返す銘柄があり、そこまで広げると未検証の条件になる。
+    period1 = DETECTION_START_TS
     url = (
         f"https://query1.finance.yahoo.com/v8/finance/chart/{ysym}"
         f"?period1={period1}&period2=9999999999&interval=1wk"
@@ -295,11 +307,14 @@ def detect_levels(candles: list, k: int = 2) -> list:
     below = sorted([lv for lv in strong if lv["price"] <= last_p], key=lambda lv: -lv["touches"])[:4]
     levels = above + below
 
-    ath_match = next((lv for lv in levels if abs(math.log(lv["price"]) - math.log(ath)) < tol), None)
-    if ath_match:
-        ath_match["kind"] = "ath"
-    else:
+    # 最高値(ATH)は必ず「実際の最高値そのもの」を線として追加する。
+    # 以前は最高値の±2.5%以内にクラスタがあると、そのクラスタ(平均値)にATHの札を付け替えていたため、
+    # 「ATH」と表示している線が実際の最高値と最大1.5%程度ずれることがあった(2026-09-18のレビュー)。
+    levels = [lv for lv in levels if abs(math.log(lv["price"]) - math.log(ath)) >= tol or lv["price"] == ath]
+    if not any(lv["price"] == ath for lv in levels):
         levels.append({"price": ath, "touches": 1, "kind": "ath"})
+    else:
+        next(lv for lv in levels if lv["price"] == ath)["kind"] = "ath"
     return levels
 
 

@@ -4,9 +4,16 @@
 対象: 主要指数(S&P500・NYダウ・NASDAQ・日経225・ハンセン・DAX・金) + 主要仮想通貨(BTC/ETH/SOL/XRP)。
 
 market_scan.py は「水平線に近い」「トレンドラインに近い」をそれぞれ別々にチェックしているが、
-このスキャンは分析メモ・じんのNotionコラムに出てくる「トレンドラインのサポートと水平線が
-交わる付近まで価格が落ちてきている(カチカチだから反発しやすい)」という、より絞り込んだ
-セットアップだけを探す。
+このスキャンは「トレンドラインのサポートと水平線が交わる付近まで価格が落ちてきている」という、
+より絞り込んだセットアップだけを探す。
+
+【注意】2026-09-18のレビューで判明した前提の弱さ:
+- 分析メモ・スクショ解説に出てくる「交点」は、すべて**高値側の抵抗線×水平線=利確・反落ポイント**の話で
+  (分析メモ2章「水平線と斜め線の交点=特に強い抵抗」、4章「交点へのタッチ=利確候補」)、
+  ここで実装している「支持線×水平線=買い場」に相当する記述は見つかっていない。以前ここに書いていた
+  「カチカチだから反発しやすい」という文言も、学びのテキストには存在しない。
+- バックテスト(backtest/REPORT.md・CODEX_ANALYSIS.md)でも、交点に買いの優位性は確認できていない。
+- したがってこのスキャンは「学びに基づく買いシグナル」ではなく、検証途中の機械的な抽出として扱うこと。
 
 トレンドラインは main.py の detect_trendlines()(期間全体で最もタッチ数の多い1本を選ぶ)ではなく、
 このファイル独自に「直近の安値どうしを結ぶ、割り込まれていない上昇支持線」を
@@ -26,12 +33,16 @@ import os
 import requests
 
 from main import (
-    DB_URL, asset_symbol, body_position_label, chart_link, fetch_candles_for, find_pivots, fmt_price,
+    DB_URL, DETECTION_WINDOW_DAYS, asset_symbol, body_position_label, chart_link, fetch_candles_for,
+    find_pivots, fmt_price,
     jst_today_str, push_scan_history, render_chart_png, send_digest_email,
 )
 
 LINES_GAP_PCT = 0.03    # トレンドラインと水平線が「交わっている」とみなす近さ
-NOW_GAP_PCT = 0.05      # 現在値が交点圏内にあるとみなす近さ
+# 現在値が交点圏内にあるとみなす近さ。5%→3%に変更(2026-09-18)。
+# しきい値を1〜10%まで総当たりした結果、狭めるほど成績が上がる傾向が学習期間・検証期間の両方で確認できた
+# (期待値 train 0.571%→0.710%、validation 0.716%→0.947%。backtest/sweep/REPORT_SWEEP.md)。点灯数は約3/4に減る。
+NOW_GAP_PCT = 0.03
 DECLINE_LOOKBACK = 6    # 何本前と比べて「下げてきている」を判定するか
 PIVOT_K = 2             # find_pivots の前後本数(main.pyのdetect_levels/detect_trendlinesと揃える)
 LEVEL_TOL_PCT = 0.02    # 水平線としてまとめる価格の近さ(±2%)
@@ -97,6 +108,11 @@ def active_support_trendline(candles: list) -> dict | None:
         return None
     (x1, y1), (x2, y2) = hull[-2], hull[-1]
     slope = (y2 - y1) / (x2 - x1)
+    if slope <= 0:
+        # 学びの「トレンドラインのサポート」は安値が切り上がる上昇支持線を指す(分析メモ2・16章)。
+        # 傾きが0以下の線は下降・横ばいの安値ラインなので、交点シグナルの対象にしない
+        # (2026-09-18のレビューで、下向きの線でも交点として通知していたことが判明)。
+        return None
     trend_val = y2 + slope * ((n - 1) - x2)
     # 線は凸包の末尾2点だけで引いている(凸包は同一直線上の点を除くので、線上の安値は常に2点)。
     # len(hull) は凸包全体の頂点数であって「この線が通る安値の数」ではないため、メールには出さない。
@@ -106,6 +122,13 @@ def active_support_trendline(candles: list) -> dict | None:
 def find_confluence_in_candles(candles: list, current: float | None = None) -> dict | None:
     """トレンドライン×水平線の交点判定の本体。candlesは取得済みのものを渡す形にして、
     market_scan.py側の227銘柄スキャンからも(二重にAPI取得せず)同じ判定を呼べるようにしている。"""
+    # 交点は「直近8年」で検証した条件なので、ここで期間を8年に揃える。
+    # 支持線接近のほうは全期間に広げると成績が上がったが(main.py の fetch_stock_candles 参照)、
+    # 交点では学習期間と検証期間で改善の向きが一致しなかったため、従来どおり8年のままにしている
+    # (backtest/window_review/REPORT_WINDOW.md)。
+    if candles:
+        cutoff = candles[-1]["t"] - DETECTION_WINDOW_DAYS * 86400 * 1000
+        candles = [c for c in candles if c["t"] >= cutoff]
     n = len(candles)
     if n < 30:
         return None
@@ -163,8 +186,10 @@ def build_reason(hit: dict) -> str:
         f"現在値の{hit['lines_gap']*100:.1f}%以内まで接近しています。"
         f"現在価格({fmt_price(hit['current'])})はその交点の{hit['now_gap']*100:.1f}%圏内で、"
         "直近は上からこのゾーンに向けて下げてきています。"
-        "教材の考え方でいう「トレンドラインと水平線の交点(カチカチ)」に近い状態で、反発しやすいと考えられます。"
-        "ただし実体でこのゾーンを割り込んだ場合はシナリオ崩れとみなし、早めに見切るのが基本です。"
+        "※この「支持線×水平線の交点で反発しやすい」という前提は、学習メモには書かれていません"
+        "(メモに出てくる交点は高値側の抵抗線との交点=利確ポイントの話です)。"
+        "過去データの検証でも、交点であること自体の優位性は確認できていません。"
+        "実体でこのゾーンを割り込んだ場合はシナリオ崩れとみなし、早めに見切るのが基本です。"
     )
 
 
