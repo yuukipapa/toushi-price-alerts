@@ -164,10 +164,29 @@ def fetch_stock_candles(ysym: str) -> list:
         if None in (o, h, l, c):
             continue
         candles.append({"t": t * 1000, "o": o, "h": h, "l": l, "c": c})
-    return merge_trailing_same_period(candles, WEEKLY_MERGE_GAP_MS)
+    return merge_trailing_same_period(drop_untraded_last_bar(candles), WEEKLY_MERGE_GAP_MS)
 
 
 WEEKLY_MERGE_GAP_MS = 6 * 86400 * 1000
+
+
+def drop_untraded_last_bar(candles: list) -> list:
+    """まだ1度も取引されていない末尾の足を落とす。
+
+    連休明けの朝は、Yahooが「その週の行」を値幅ゼロ(高値=安値)で先に返すことがある。
+    そのまま使うと足が1本増え、ピボットの確定が1本早まってトレンドライン・水平線の判定がずれる
+    (2026-09-24の検証: シルバーウィーク明けに交点の通知が28件→44件へ増え、16件が本来出ないものだった)。
+    値幅ゼロ(高値=安値)は、古い低流動の週などで過去にも実在するため(日経225の44銘柄で83件)、
+    誤って過去の週を落とさないよう「末尾が今週の足であること」も条件にする。
+    """
+    if len(candles) < 2:
+        return candles
+    last = candles[-1]
+    now_ms = datetime.now(timezone.utc).timestamp() * 1000
+    is_current = now_ms - last["t"] <= 8 * 86400 * 1000
+    if is_current and last["h"] == last["l"]:
+        return candles[:-1]
+    return candles
 
 
 def merge_trailing_same_period(candles: list, period_ms: int) -> list:
