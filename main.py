@@ -383,6 +383,124 @@ def trendline_price_at(tl: dict, i: float) -> float:
 
 # ── チャート画像の生成(通知メールに添付する用) ──
 
+# ── 最安値・最高値を結んだ斜め線(外枠線)──────────────────────────
+# chart_check.html の HULL_SPANS / hullOf() / computeHullLines() をそのまま移植したもの。
+# 「すべての安値がその線の上に残る」線なので、detect_trendlines()(最多タッチ)とは別物。
+# ツール側と同じ線が出るように、手順・定数・判定の順番を変えないこと。
+# 注意: 配信側の株価は DETECTION_START_TS(2007-01-01)以降しか読まないため、
+# 「長期=全期間」の起点がツール表示(2000年前後から)とずれることがある。
+# これはバックテストで検証した範囲に合わせるための意図的な差(2026-10-06ユーザー確定)。
+HULL_SPANS = [
+    # (key, 表示名, 何年ぶんか(Noneは全期間), 乗る点の最低数は下の HULL_MIN_TOUCH)
+    ("long", "長期", None),
+    ("mid", "中期", 5),
+    ("short", "短期", 1),
+]
+HULL_TOL = 0.025        # 線に乗っているとみなす対数距離(他の線と同じ)
+HULL_MIN_TOUCH = 3      # 安値側(支持線)は3点以上
+HULL_MIN_TOUCH_RES = 2  # 高値側(抵抗線)は2点以上
+HULL_MIN_BARS = 30
+
+
+def _hull_of(idx: list, logp: list, lower: bool) -> list:
+    """下側(または上側)凸包。chart_check.html の hullOf() と同じ。
+    idx/logp は同じ長さで、logp は対数価格。返すのは idx/logp 上の位置。"""
+    h = []
+    for k in range(len(idx)):
+        while len(h) >= 2:
+            a, b = h[-2], h[-1]
+            cross = ((idx[b] - idx[a]) * (logp[k] - logp[a])
+                     - (logp[b] - logp[a]) * (idx[k] - idx[a]))
+            if (cross <= 0) if lower else (cross >= 0):
+                h.pop()
+            else:
+                break
+        h.append(k)
+    return h
+
+
+def compute_hull_lines(candles: list) -> list:
+    """長期・中期・短期それぞれについて、安値側(sup)と高値側(res)の外枠線を引く。
+
+    返り値は線ごとの dict:
+      span/label  … "long"/"長期" など
+      kind        … "sup"(安値を結んだ線) / "res"(高値を結んだ線)
+      i1,p1,i2,p2 … 線を決めている2点(candles上の位置と価格。i1が古い方)
+      touches     … 線の上に乗っている点の数
+      price_now   … 最新の足の位置まで線を伸ばしたときの価格
+    """
+    n_all = len(candles)
+    if n_all < HULL_MIN_BARS:
+        return []
+    last_t = candles[-1]["t"]
+    out = []
+    for key, label, years in HULL_SPANS:
+        if years is None:
+            off = 0
+        else:
+            frm = last_t - years * 365 * 86400 * 1000
+            off = next((i for i, c in enumerate(candles) if c["t"] >= frm), 0)
+        win = candles[off:]
+        n = len(win)
+        if n < HULL_MIN_BARS:
+            continue
+        for kind, lower in (("sup", True), ("res", False)):
+            vals = [c["l"] if lower else c["h"] for c in win]
+            if min(vals) <= 0:
+                continue
+            logv = [math.log(v) for v in vals]
+            # 起点 = その期間の最安値(高値側は最高値)。同値なら古い方
+            anchor = 0
+            for i in range(1, n):
+                if (vals[i] < vals[anchor]) if lower else (vals[i] > vals[anchor]):
+                    anchor = i
+            # 伸ばす向き。安値側は常に右。高値側は足が多く残っている側へ伸ばす
+            # (上昇中の銘柄は最高値が右端にあり、右へは線が引けないため)
+            go_left = (kind == "res") and anchor > (n - 1) / 2
+            if (anchor if go_left else n - 1 - anchor) < 10:
+                continue
+            if go_left:
+                idx = list(range(anchor + 1))
+                lp = [logv[anchor - d] for d in idx]
+            else:
+                idx = list(range(n - anchor))
+                lp = [logv[anchor + d] for d in idx]
+            h = _hull_of(idx, lp, lower)
+            if len(h) < 2:
+                continue
+            a, b = h[0], h[1]
+            if idx[b] - idx[a] < n * 0.1:
+                continue
+            slope = (lp[b] - lp[a]) / (idx[b] - idx[a])
+            if not go_left:
+                if (slope <= 0) if lower else (slope >= 0):
+                    continue
+            touches = 0
+            for k in range(len(idx)):
+                expect = lp[a] + slope * (idx[k] - idx[a])
+                if abs(lp[k] - expect) < HULL_TOL:
+                    touches += 1
+            if touches < (HULL_MIN_TOUCH_RES if kind == "res" else HULL_MIN_TOUCH):
+                continue
+            def to_pos(d):
+                return (anchor - d if go_left else anchor + d) + off
+            i1, i2 = to_pos(idx[a]), to_pos(idx[b])
+            p1, p2 = math.exp(lp[a]), math.exp(lp[b])
+            if i1 > i2:
+                i1, i2, p1, p2 = i2, i1, p2, p1
+            if i2 == i1:
+                continue
+            slope_pos = (math.log(p2) - math.log(p1)) / (i2 - i1)
+            if go_left and slope_pos <= 0:
+                continue
+            out.append({
+                "span": key, "label": label, "kind": kind,
+                "i1": i1, "p1": p1, "i2": i2, "p2": p2, "touches": touches,
+                "price_now": math.exp(math.log(p1) + slope_pos * (n_all - 1 - i1)),
+            })
+    return out
+
+
 def asset_symbol(entry: dict) -> str:
     # GitHub Actionsのランナーには日本語フォントが無く、チャート画像内のタイトルに
     # 日本語ラベルを使うと文字が表示されない(tofu化する)ため、ASCIIのティッカーを使う
