@@ -390,11 +390,14 @@ def trendline_price_at(tl: dict, i: float) -> float:
 # 注意: 配信側の株価は DETECTION_START_TS(2007-01-01)以降しか読まないため、
 # 「長期=全期間」の起点がツール表示(2000年前後から)とずれることがある。
 # これはバックテストで検証した範囲に合わせるための意図的な差(2026-10-06ユーザー確定)。
+# 4つめは安値側(支持線)で線上に必要な点の数。中期だけ2点にしているのは、
+# 急騰・急落した銘柄で中期の線がほとんど出なかったため(2026-10-07ユーザー確定)。
+# chart_check.html の HULL_SPANS と必ず同じ値にすること(ツールとメールで線が食い違わないように)。
 HULL_SPANS = [
-    # (key, 表示名, 何年ぶんか(Noneは全期間), 乗る点の最低数は下の HULL_MIN_TOUCH)
-    ("long", "長期", None),
-    ("mid", "中期", 5),
-    ("short", "短期", 1),
+    # (key, 表示名, 何年ぶんか(Noneは全期間), 安値側で必要な点の数)
+    ("long", "長期", None, 3),
+    ("mid", "中期", 5, 2),
+    ("short", "短期", 1, 3),
 ]
 HULL_TOL = 0.025        # 線に乗っているとみなす対数距離(他の線と同じ)
 HULL_MIN_TOUCH = 3      # 安値側(支持線)は3点以上
@@ -434,7 +437,7 @@ def compute_hull_lines(candles: list) -> list:
         return []
     last_t = candles[-1]["t"]
     out = []
-    for key, label, years in HULL_SPANS:
+    for key, label, years, min_touch in HULL_SPANS:
         if years is None:
             off = 0
         else:
@@ -480,7 +483,7 @@ def compute_hull_lines(candles: list) -> list:
                 expect = lp[a] + slope * (idx[k] - idx[a])
                 if abs(lp[k] - expect) < HULL_TOL:
                     touches += 1
-            if touches < (HULL_MIN_TOUCH_RES if kind == "res" else HULL_MIN_TOUCH):
+            if touches < (HULL_MIN_TOUCH_RES if kind == "res" else min_touch):
                 continue
             def to_pos(d):
                 return (anchor - d if go_left else anchor + d) + off
