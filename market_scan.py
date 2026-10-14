@@ -225,10 +225,24 @@ def main() -> None:
 
     confluence_hits.sort(key=lambda h: h["lines_gap"] + h["now_gap"])
     rsi_hits.sort(key=lambda h: h["rsi"])
-    # トレンドライン×水平線の交点として別枠で出す銘柄は、下の「支持線に接近」リストからは除外する
-    # (同じ銘柄が2回、別々の見出しで並ぶのを防ぐ)
-    confluence_ysyms = {h["entry"]["ysym"] for h in confluence_hits}
-    all_hits = [h for h in all_hits if h["ysym"] not in confluence_ysyms]
+
+    # どの銘柄がどの条件に当てはまったかを、重複を取り除く前に控えておく。
+    # 1銘柄は1枚のカードにまとめるが、他の条件にも当てはまっていた事実は本文に出す
+    # (2026-10-07ユーザー依頼。どれか1つの枠に入ると他が見えなくなるのを防ぐため)。
+    matched = {}
+    for h in hull_all:
+        matched.setdefault(h["ysym"], set()).add("📐外枠線")
+    for h in confluence_hits:
+        matched.setdefault(h["entry"]["ysym"], set()).add("🎯交点")
+    for h in rsi_hits:
+        matched.setdefault(h["ysym"], set()).add(f"📉RSI{RSI_OVERSOLD}割れ")
+    for h in all_hits:
+        matched.setdefault(h["ysym"], set()).add("支持線接近")
+
+    # 重複したときの優先順位: 📐外枠線 > 🎯交点 > 支持線接近(2026-10-07ユーザー確定で外枠線を最優先に変更)。
+    # RSIは他と性格が違う指標なので、重複を取り除く対象にしていない。
+    # 交点と支持線接近の上下は従来どおり。交点の方が条件が厳しく、
+    # ここを入れ替えると上位8件に入りきらない銘柄がメールから丸ごと消えてしまうため。
 
     # 外枠線は「線に近い順」に並べる(最多タッチ順ではない。乗る点が多い線ほど成績が落ちる、
     # というバックテスト結果が出ているため、タッチ数を優先順位に使わない)。
@@ -236,79 +250,49 @@ def main() -> None:
     hull_all.sort(key=lambda h: h["dist_pct"])
     hull_hits, seen_hull = [], set()
     for h in hull_all:
-        if h["ysym"] in confluence_ysyms or h["ysym"] in seen_hull:
+        if h["ysym"] in seen_hull:
             continue
         seen_hull.add(h["ysym"])
         hull_hits.append(h)
     hull_hits = hull_hits[:HULL_TOP_N]
-    # 外枠線で別枠に出した銘柄は、下の「支持線に接近」リストからは外す(同じ銘柄が2回並ぶのを防ぐ)
     hull_ysyms = {h["ysym"] for h in hull_hits}
-    all_hits = [h for h in all_hits if h["ysym"] not in hull_ysyms]
+
+    # 外枠線で出した銘柄は、交点・支持線接近からは外す
+    confluence_hits = [h for h in confluence_hits if h["entry"]["ysym"] not in hull_ysyms]
+    confluence_ysyms = {h["entry"]["ysym"] for h in confluence_hits}
+    all_hits = [h for h in all_hits
+                if h["ysym"] not in hull_ysyms and h["ysym"] not in confluence_ysyms]
 
     all_hits.sort(key=lambda h: (-h["touches"], h["dist_pct"]))
     top = all_hits[:TOP_N]
     print(
-        f"found {len(confluence_hits)} confluence, {len(rsi_hits)} rsi<{RSI_OVERSOLD}, "
-        f"{len(hull_all)} hull candidates (sending {len(hull_hits)}), "
-        f"{len(all_hits)} support candidates, sending {len(confluence_hits)} confluence + "
-        f"{len(rsi_hits)} rsi + top {len(top)}"
+        f"found {len(hull_all)} hull candidates (sending {len(hull_hits)}), "
+        f"{len(rsi_hits)} rsi<{RSI_OVERSOLD}, {len(all_hits)} support candidates, "
+        f"{len(confluence_hits)} confluence, sending {len(hull_hits)} hull + "
+        f"{len(rsi_hits)} rsi + top {len(top)} + {len(confluence_hits)} confluence"
     )
+
+    def also_note(ysym, own):
+        """その銘柄が当てはまった、ほかの条件を一行にまとめる。"""
+        others = sorted(matched.get(ysym, set()) - {own})
+        return "\n  【ほかにも当てはまった条件】" + " / ".join(others) if others else ""
 
     items = []
     if not confluence_hits and not rsi_hits and not hull_hits and not top:
         print("no candidates today, skipping email")
     else:
         intro_lines = ["今日の週足スキャン結果です。"]
-        if confluence_hits:
-            intro_lines.append("🎯 トレンドラインと水平線が交わる付近まで下げてきている銘柄(最有力セットアップ)、")
-        if rsi_hits:
-            intro_lines.append(f"📉 週足RSIが{RSI_OVERSOLD}を割り込んだ銘柄(売られすぎ)、")
         if hull_hits:
             intro_lines.append("📐 外枠線(安値のヒゲを結んだ線)に近づいている銘柄、")
-        intro_lines.append("反応回数が多い順の支持線接近銘柄、の順に並んでいます。")
+        if rsi_hits:
+            intro_lines.append(f"📉 週足RSIが{RSI_OVERSOLD}を割り込んだ銘柄(売られすぎ)、")
+        if top:
+            intro_lines.append("反応回数が多い順の支持線接近銘柄、")
+        if confluence_hits:
+            intro_lines.append("🎯 トレンドラインと水平線が交わる付近まで下げてきている銘柄、")
+        intro_lines.append("の順に並んでいます。1銘柄は1枚にまとめ、")
+        intro_lines.append("ほかの条件にも当てはまった場合は本文の最後に書いています。")
         intro_lines.append("※ 学習メモの考え方に沿った機械的な抽出であり、投資助言ではありません。")
-
-        for h in confluence_hits:
-            entry = h["entry"]
-            tl = h["tl"]
-            aline = [[h["candles"][tl["i1"]]["t"], tl["p1"]], [h["candles"][-1]["t"], tl["trend_val"]]]
-            link = chart_link(entry["ysym"], entry["label"], hline=h["level"]["price"], aline=aline)
-            try:
-                png = render_chart_png(
-                    h["candles"], entry["ysym"],
-                    hline=h["level"]["price"], aline=(tuple(aline[0]), tuple(aline[1])),
-                )
-            except Exception as e:
-                print(f"[confluence] chart render failed for {entry['label']}: {e}")
-                png = None
-            items.append({
-                "header": f"🎯 {entry['label']} ({entry['ysym'].replace('.T', '')}) — トレンドライン×水平線の交点",
-                "text": build_confluence_reason(h),
-                "chart_link": link,
-                "png": png,
-                "asset_type": "stock",
-                "ysym": entry["ysym"],
-                "hline": h["level"]["price"],
-                "aline": aline,
-            })
-
-        for h in rsi_hits:
-            link = chart_link(h["ysym"], h["label"])
-            try:
-                png = render_chart_png(h["candles"], h["ysym"])
-            except Exception as e:
-                print(f"[rsi] chart render failed for {h['label']}: {e}")
-                png = None
-            items.append({
-                "header": f"📉 {h['label']} ({h['ysym'].replace('.T', '')}) — 週足RSI{h['rsi']:.0f}(売られすぎ)",
-                "text": build_rsi_reason(h),
-                "chart_link": link,
-                "png": png,
-                "asset_type": "stock",
-                "ysym": h["ysym"],
-                "hline": None,
-                "aline": None,
-            })
 
         for h in hull_hits:
             aline = [[h["candles"][h["i1"]]["t"], h["p1"]], [h["candles"][-1]["t"], h["price"]]]
@@ -326,13 +310,31 @@ def main() -> None:
             items.append({
                 "header": (f"📐 {h['label']} ({h['ysym'].replace('.T', '')}) — "
                            f"{h['span_label']}の外枠線に接近(安値を結んだ線)"),
-                "text": build_hull_reason(h),
+                "text": build_hull_reason(h) + also_note(h["ysym"], "📐外枠線"),
                 "chart_link": link,
                 "png": png,
                 "asset_type": "stock",
                 "ysym": h["ysym"],
                 "hline": None,
                 "aline": aline,
+            })
+
+        for h in rsi_hits:
+            link = chart_link(h["ysym"], h["label"])
+            try:
+                png = render_chart_png(h["candles"], h["ysym"])
+            except Exception as e:
+                print(f"[rsi] chart render failed for {h['label']}: {e}")
+                png = None
+            items.append({
+                "header": f"📉 {h['label']} ({h['ysym'].replace('.T', '')}) — 週足RSI{h['rsi']:.0f}(売られすぎ)",
+                "text": build_rsi_reason(h) + also_note(h["ysym"], f"📉RSI{RSI_OVERSOLD}割れ"),
+                "chart_link": link,
+                "png": png,
+                "asset_type": "stock",
+                "ysym": h["ysym"],
+                "hline": None,
+                "aline": None,
             })
 
         for h in top:
@@ -354,7 +356,7 @@ def main() -> None:
                 png = None
             items.append({
                 "header": f"■ {h['label']} ({h['ysym'].replace('.T', '')})",
-                "text": build_reason(h),
+                "text": build_reason(h) + also_note(h["ysym"], "支持線接近"),
                 "chart_link": link,
                 "png": png,
                 "asset_type": "stock",
@@ -363,19 +365,46 @@ def main() -> None:
                 "aline": aline,
             })
 
+        for h in confluence_hits:
+            entry = h["entry"]
+            tl = h["tl"]
+            aline = [[h["candles"][tl["i1"]]["t"], tl["p1"]], [h["candles"][-1]["t"], tl["trend_val"]]]
+            link = chart_link(entry["ysym"], entry["label"], hline=h["level"]["price"], aline=aline)
+            try:
+                png = render_chart_png(
+                    h["candles"], entry["ysym"],
+                    hline=h["level"]["price"], aline=(tuple(aline[0]), tuple(aline[1])),
+                )
+            except Exception as e:
+                print(f"[confluence] chart render failed for {entry['label']}: {e}")
+                png = None
+            items.append({
+                "header": f"🎯 {entry['label']} ({entry['ysym'].replace('.T', '')}) — トレンドライン×水平線の交点",
+                "text": build_confluence_reason(h) + also_note(entry["ysym"], "🎯交点"),
+                "chart_link": link,
+                "png": png,
+                "asset_type": "stock",
+                "ysym": entry["ysym"],
+                "hline": h["level"]["price"],
+                "aline": aline,
+            })
+
+        # 件名も本文と同じ並びにする(2026-10-07ユーザー確定)
         subject_bits = []
-        if confluence_hits:
-            subject_bits.append(f"🎯交点{len(confluence_hits)}件")
-        if rsi_hits:
-            subject_bits.append(f"📉RSI30割れ{len(rsi_hits)}件")
         if hull_hits:
             subject_bits.append(f"📐外枠線{len(hull_hits)}件")
+        if rsi_hits:
+            subject_bits.append(f"📉RSI{RSI_OVERSOLD}割れ{len(rsi_hits)}件")
         if top:
             subject_bits.append(f"支持線接近{len(top)}件")
+        if confluence_hits:
+            subject_bits.append(f"🎯交点{len(confluence_hits)}件")
+        # 件名の代表銘柄は、本文の先頭に出る銘柄に合わせる
         lead = (
-            confluence_hits[0]["entry"]["label"] if confluence_hits
+            hull_hits[0]["label"] if hull_hits
             else rsi_hits[0]["label"] if rsi_hits
-            else top[0]["label"]
+            else top[0]["label"] if top
+            else confluence_hits[0]["entry"]["label"]
         )
         subject = f"📊 今日の週足スキャン({'+'.join(subject_bits)}): {lead}など"
         if to_addr:
