@@ -164,10 +164,57 @@ def fetch_stock_candles(ysym: str) -> list:
         if None in (o, h, l, c):
             continue
         candles.append({"t": t * 1000, "o": o, "h": h, "l": l, "c": c})
-    return merge_trailing_same_period(drop_untraded_last_bar(candles), WEEKLY_MERGE_GAP_MS)
+    return sanitize_candles(merge_trailing_same_period(drop_untraded_last_bar(candles), WEEKLY_MERGE_GAP_MS))
 
 
 WEEKLY_MERGE_GAP_MS = 6 * 86400 * 1000
+
+
+def sanitize_candles(candles: list, ratio: float = 0.5) -> list:
+    """Yahooが返す足に、始値や安値・高値だけが桁違いに外れた明らかな誤りが混じることがある。
+
+    実例(2026-10-24): 1321(日経225連動ETF)の2026-10-05の週だけ、始値・安値が 7.2円
+    (前後は約670円)。安値の下側凸包を使う外枠線の計算は「期間の最安値」を起点にするため、
+    この1本で起点が右端に寄って線が引けなくなり、直近3週ぶんの通知が出ていなかった。
+    chart_check.html の sanitizeCandles() と同じ判定にしてある(ツールとメールで線が食い違わないように)。
+
+    同じ種類の誤りは1306(TOPIX連動ETF)の2026-03-30の週にもあった(始値・安値が約1/10)。
+    また1321の2009年8月〜2010年1月は始値が0(欠損)で返る。これは始値だけを直し、高値・安値には触らない。
+
+    直し方: 前後の足と比べて極端に外れた値だけを、その足の他の値の範囲に収める。
+      ・始値が前後の終値の半分未満/2倍超 → 前の足の終値(その足の高値〜安値に収める)
+      ・安値が前後の安値の半分未満 → 始値と終値の小さいほう
+      ・高値が前後の高値の2倍超 → 始値と終値の大きいほう
+    足は削らない(削ると週の本数が変わり、計算の位置がずれるため)。直した足はログに出す。"""
+    n = len(candles)
+    for i, x in enumerate(candles):
+        nb = [candles[j] for j in (i - 1, i + 1) if 0 <= j < n]
+        if not nb:
+            continue
+        c_lo = min(r["c"] for r in nb); c_hi = max(r["c"] for r in nb)
+        l_ref = min(r["l"] for r in nb); h_ref = max(r["h"] for r in nb)
+        before = dict(x)
+        open_bad = x["o"] < ratio * c_lo or x["o"] > c_hi / ratio
+        lo_bad = x["l"] < ratio * l_ref
+        hi_bad = x["h"] > h_ref / ratio
+        if not (open_bad or lo_bad or hi_bad):
+            continue   # 異常でない足には一切触らない(終値が安値より下にある等の小さな食い違いは本来のデータのまま)
+        if open_bad:
+            # 始値だけがおかしい足(1321の2009年8月〜2010年1月は始値が0で返る=欠損)は、高値・安値に触らず
+            # 始値だけを「前の足の終値を、その足の高値〜安値に収めた値」にする
+            prev_c = candles[i - 1]["c"] if i > 0 else x["c"]
+            x["o"] = min(max(prev_c, x["l"]), x["h"])
+        if lo_bad:
+            x["l"] = min(x["o"], x["c"])
+        if hi_bad:
+            x["h"] = max(x["o"], x["c"])
+        if lo_bad or hi_bad:   # 安値・高値を直した足は、始値・終値が範囲に収まるようにも整える
+            x["l"] = min(x["l"], x["o"], x["c"]); x["h"] = max(x["h"], x["o"], x["c"])
+        if lo_bad or hi_bad:   # 始値の欠損(古いデータに多い)は毎回出すと騒がしいので、線に影響する安値・高値の修正だけ出す
+            day = datetime.fromtimestamp(x["t"] / 1000, JST).strftime("%Y-%m-%d")
+            print(f"[sanitize] {day} の足の異常値を直しました: "
+                  f"始{before['o']:.4g}→{x['o']:.4g} 高{before['h']:.4g}→{x['h']:.4g} 安{before['l']:.4g}→{x['l']:.4g}")
+    return candles
 
 
 def drop_untraded_last_bar(candles: list) -> list:
@@ -539,7 +586,7 @@ def chart_link(entry: dict, tf: str = "1w", hline: float = None, aline: tuple = 
 
 def render_chart_png(
     candles: list, title: str, hline: float = None, aline: tuple = None,
-    n: int = 60, current: float = None,
+    n: int = 60, current: float = None, aline_scale: str = "log",
 ) -> bytes:
     """current を渡さない場合は最終足の終値を現在価格として扱い、オレンジの水平線+価格ラベルを引く。
     タイトルには現在価格と最終足の日本時間を出す(GitHub Actionsのランナーには日本語フォントが
@@ -560,6 +607,8 @@ def render_chart_png(
         slope = (math.log(p2) - math.log(p1)) / (t2 - t1) if t2 != t1 else 0.0
 
         def price_at(t_ms):
+            if aline_scale == "linear":   # 線形で引いた線は、画像でも線形のまま描く(対数だと途中がずれる)
+                return p1 + (p2 - p1) * (t_ms - t1) / (t2 - t1) if t2 != t1 else p2
             return math.exp(math.log(p1) + slope * (t_ms - t1))
 
         t1s = min(visible_ts, key=lambda x: abs(x - t1))
@@ -900,6 +949,11 @@ def check_alerts(doc: dict, gmail_user: str, gmail_pass: str) -> bool:
         if price is None:
             continue
 
+        if a.get("kind") == "watch":   # 買い場監視は、またぎではなく「近づいた/5%下を割った」で通知する
+            if check_watch(a, price, to_addr, gmail_user, gmail_pass):
+                changed = True
+            continue
+
         is_trend = a.get("kind") == "trend"
         try:
             line_price = trend_price_now(a) if is_trend else a["price"]
@@ -966,7 +1020,7 @@ def _render_alert_chart(a: dict, is_trend: bool, line_price: float, candles: lis
         if is_trend:
             now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
             aline = ((a["t1"], a["p1"]), (now_ms, line_price))
-            png = render_chart_png(candles, asset_symbol(a), aline=aline)
+            png = render_chart_png(candles, asset_symbol(a), aline=aline, aline_scale=a.get("scale") or "log")
         else:
             png = render_chart_png(candles, asset_symbol(a), hline=line_price)
         return [{"cid": "chart1", "data": png, "caption": ""}]
@@ -975,15 +1029,132 @@ def _render_alert_chart(a: dict, is_trend: bool, line_price: float, candles: lis
         return None
 
 
-def trend_price_now(a: dict) -> float:
-    # 斜め線(トレンドライン)は時間で価格が変わるため、保存した2点(t1,p1)-(t2,p2)から
-    # 現在時刻での延長線上の価格をlog空間で線形補間して求める(chart_check.htmlの傾き計算と同じ考え方)
+def line_value_at(a: dict, t_ms: float) -> float:
+    """保存した2点(t1,p1)-(t2,p2)を通る斜め線の、時刻 t_ms での価格。
+
+    a["scale"] が "linear" なら線形(TradingViewの普通の目盛りで引いた線)、それ以外は対数。
+    記録が無い古いアラートは対数のまま(従来の動きを変えない)。
+    3つの安値が線形ではほぼ一直線なのに対数では6.5%ずれる、という例があり(2026-10-24、1321)、
+    引いた目盛りと同じ方式で延長しないと、線の今の値が650円のところが709円になる。"""
     t1, p1, t2, p2 = a["t1"], a["p1"], a["t2"], a["p2"]
-    now_ms = datetime.now(timezone.utc).timestamp() * 1000
     if t2 == t1:
         return p2
+    if a.get("scale") == "linear":
+        return p1 + (p2 - p1) * (t_ms - t1) / (t2 - t1)
     slope = (math.log(p2) - math.log(p1)) / (t2 - t1)
-    return math.exp(math.log(p1) + slope * (now_ms - t1))
+    return math.exp(math.log(p1) + slope * (t_ms - t1))
+
+
+def trend_price_now(a: dict) -> float:
+    # 斜め線(トレンドライン)は時間で価格が変わるため、保存した2点から現在時刻での延長線上の価格を求める
+    return line_value_at(a, datetime.now(timezone.utc).timestamp() * 1000)
+
+
+# ── 買い場監視(kind="watch"): 自分で引いた斜め線に「近づいた」「5%下を割った」を知らせる ──
+# 2026-10-24ユーザー確定。2点で引いた線に3点目で触れて反発する形を、触れる前に知るための仕組み。
+# 🔔(kind="trend")は線を「またいだ瞬間」しか知らせないので、反発して線の上に戻ると何も来ない。
+WATCH_NEAR_PCT = 2.0    # 線の上この%以内に来たら「買い場候補」(既存の支持線接近スキャンと同じ2%)
+WATCH_STOP_PCT = 5.0    # 線のこの%下を割ったら「損切りライン」(バックテストの出口「線下5%」と同じ)
+WATCH_HYST_PCT = 1.0    # 境目で行ったり来たりして何度も通知しないための余白
+
+
+def watch_next_zone(gap_pct: float, prev: str, near: float, stop: float, hyst: float = WATCH_HYST_PCT) -> str:
+    """線との差(%)から、今いる区域を決める。区域は far(遠い) / near(買い場) / stop(損切り以下)。
+    境目では余白(hyst)ぶん戻るまで区域を変えない。gap_pct = (価格 - 線) / 線 × 100。"""
+    if prev is None:       # 初回は今の位置を記録するだけ(いきなり通知しない。🔔と同じ約束)
+        return "stop" if gap_pct < -stop else ("near" if gap_pct <= near else "far")
+    if prev == "far":
+        return "stop" if gap_pct < -stop else ("near" if gap_pct <= near else "far")
+    if prev == "near":
+        if gap_pct < -stop:
+            return "stop"
+        return "far" if gap_pct > near + hyst else "near"
+    # prev == "stop": 損切りラインより余白ぶん上に戻るまで stop のまま
+    if gap_pct >= -stop + hyst:
+        return "far" if gap_pct > near + hyst else "near"
+    return "stop"
+
+
+def check_watch(a: dict, price: float, to_addr, gmail_user: str, gmail_pass: str) -> bool:
+    """買い場監視を1件チェックする。区域が変わった(または初回の記録をした)ら True を返す。"""
+    now_ms = datetime.now(timezone.utc).timestamp() * 1000
+    try:
+        line = line_value_at(a, now_ms)
+    except Exception as e:
+        print(f"[watch] line calc failed for {a.get('label')}: {e}")
+        return False
+    if not (line > 0):
+        print(f"[watch] skip {a.get('label')}: 線の値が0以下です(線形で遠くまで延ばしすぎ)")
+        return False
+    near = float(a.get("nearPct", WATCH_NEAR_PCT)); stop = float(a.get("stopPct", WATCH_STOP_PCT))
+    gap = (price - line) / line * 100
+    prev = a.get("zone")
+    new = watch_next_zone(gap, prev, near, stop)
+    stop_price = line * (1 - stop / 100)
+    desc = f"{a['label']} 線{fmt_price(line)} 現在{fmt_price(price)} 差{gap:+.2f}% 区域 {prev}→{new}"
+    if prev is None:
+        a["zone"] = new
+        print(f"[watch] baseline set: {desc}")
+        return True
+    if new == prev:
+        print(f"[watch] no change: {desc}")
+        return False
+    a["zone"] = new
+    notify = (prev == "far" and new == "near") or (new == "stop" and prev != "stop")
+    print(f"[watch] zone change: {desc} notify={notify}")
+    if not notify:
+        return True
+    a["firedAt"] = datetime.now(timezone.utc).isoformat()
+    if not to_addr:
+        print("[watch] notifyEmail not set, skipping email")
+        return True
+    try:
+        try:
+            candles = fetch_candles_for(a)
+        except Exception as e:
+            print(f"[watch] candle fetch failed: {e}")
+            candles = None
+        scale_jp = "線形" if a.get("scale") == "linear" else "対数"
+        if new == "stop":
+            subject = f"🛑 損切りライン: {a['label']} が線の{stop:g}%下({fmt_price(stop_price)})を割りました"
+            head = (f"{a['label']} が、買い場監視の線の{stop:g}%下にある損切りラインを割りました。\n\n"
+                    f"現在価格: {fmt_price(price)}(線の{gap:+.2f}%)\n線の今の値: {fmt_price(line)}\n"
+                    f"損切りライン(線の{stop:g}%下): {fmt_price(stop_price)}")
+            reason = ("線の上で反発して買う形(支持線の3点目)が崩れた合図です。バックテストの出口でも、"
+                      "損切りは「買値ではなく線の価格の何%下」で置いていました。買っている場合は、"
+                      "ここで切るかどうかを決めておいた基準で判断してください。")
+        else:
+            side = f"線の上{gap:.2f}%" if gap >= 0 else f"線の下{-gap:.2f}%(損切りラインまであと{gap + stop:.2f}%)"
+            subject = f"🎯 買い場候補: {a['label']} が線({fmt_price(line)})に接近({side})"
+            head = (f"{a['label']} が、買い場監視の線に近づきました。\n\n"
+                    f"現在価格: {fmt_price(price)}\n線の今の値: {fmt_price(line)}({side})\n"
+                    f"損切りライン(線の{stop:g}%下): {fmt_price(stop_price)}"
+                    f"(今の価格から {((stop_price / price) - 1) * 100:.1f}%)")
+            reason = ("あなたが引いた斜め線への接近です。安値を結んだ線の上で反発する3点目になる可能性がありますが、"
+                      "触れずに離れることも、割れることもあります。ヒゲで触れても終値(実体)が線の上に戻るかを確認してください。")
+            if candles:
+                bw = body_wick_note(candles, line)
+                if bw:
+                    reason += "\n\n" + bw
+        body = (f"{head}\n\n【この通知の根拠】\n{reason}\n\n"
+                f"※ この線は{scale_jp}の目盛りで延長した値です(引いた目盛りと同じ方式で計算しています)。\n\n"
+                f"最新チャートを見る: {chart_link(a, aline=((a['t1'], a['p1']), (int(now_ms), line)))}\n\n"
+                "※ これは投資助言ではありません。売買の最終判断は自分で行ってください。")
+        images = None
+        if candles:
+            try:
+                n_bars = min(len(candles), max(60, int((now_ms - a["t1"]) / (7 * 86400 * 1000)) + 12), 400)
+                png = render_chart_png(candles, asset_symbol(a), hline=stop_price if new == "stop" else None,
+                                       aline=((a["t1"], a["p1"]), (int(now_ms), line)), n=n_bars,
+                                       aline_scale=a.get("scale") or "log")
+                images = [{"cid": "chart1", "data": png, "caption": ""}]
+            except Exception as e:
+                print(f"[watch] chart render failed: {e}")
+        send_email(gmail_user, gmail_pass, to_addr, subject, body, images=images)
+        print(f"[watch] sent: {subject}")
+    except Exception as e:
+        print(f"[watch] email send failed: {e}")
+    return True
 
 
 def main() -> None:
